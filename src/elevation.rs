@@ -1,15 +1,17 @@
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
-use super::config::WorldGenConfig;
+use super::config::{LandMaskMethod, WorldGenConfig};
 use super::land_mask;
 use super::plates::{Plate, PlateData};
 use super::progress::{ProgressHandle, report_stage};
 use super::world::WorldMap;
 
-const LAND_UPLIFT: f32 = 0.05;
-const LAND_COMPRESSION: f32 = 0.92;
-const OCEAN_FLOOR: f32 = 0.08;
+const LAND_UPLIFT: f32 = 0.04;
+const LAND_COMPRESSION: f32 = 1.0;
+const OCEAN_FLOOR: f32 = 0.06;
+const TERRAIN_AMPLITUDE: f32 = 1.65;
+const BOUNDARY_UPLIFT_SCALE: f32 = 2.0;
 
 fn normalize01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
@@ -52,18 +54,20 @@ impl TerrainNoise {
     }
 
     fn sample_detail(&self, w: f32, h: f32, x: usize, y: usize) -> f32 {
-        let wx = x as f32 / w * w;
-        let hy = y as f32 / h * h;
+        let nx = x as f64 / f64::from(w as u32);
+        let ny = y as f64 / f64::from(h as u32);
 
-        let continent = self.continent.get([wx as f64, hy as f64]) as f32;
-        let mountains = self.mountains.get([wx as f64, hy as f64]) as f32;
-        let hills = self.hills.get([wx as f64, hy as f64]) as f32;
+        let continent = self.continent.get([nx, ny]) as f32;
+        let mountains = self.mountains.get([nx, ny]) as f32;
+        let hills = self.hills.get([nx, ny]) as f32;
 
         let continent01 = (continent + 1.0) * 0.5;
         let mountains01 = ((mountains + 1.0) * 0.5).powi(2);
         let hills01 = (hills + 1.0) * 0.5;
 
-        normalize01(continent01 * 0.55 + hills01 * 0.28 + mountains01 * 0.12)
+        let detail =
+            continent01 * 0.48 + hills01 * 0.32 + mountains01 * 0.22;
+        normalize01((detail - 0.5) * TERRAIN_AMPLITUDE + 0.5)
     }
 }
 
@@ -191,12 +195,17 @@ pub fn generate_elevation(
     let land_mask = land_mask::generate(config);
     let boundary = compute_boundary_influence(map, plates, config);
     let noise = TerrainNoise::new(config);
+    let drunkard_mask = config.land_mask_method == LandMaskMethod::DrunkardsWalk;
+    let (mask_low, mask_high) = if drunkard_mask {
+        (0.08, 0.24)
+    } else {
+        (0.30, 0.50)
+    };
 
     let mut raw = vec![0.0f32; w * h];
-    let (min_v, max_v) = raw
-        .par_chunks_mut(w)
+    raw.par_chunks_mut(w)
         .enumerate()
-        .map(|(y, row)| {
+        .for_each(|(y, row)| {
             if y % 4 == 0 {
                 report_stage(
                     progress,
@@ -206,30 +215,64 @@ pub fn generate_elevation(
                     "Building elevation",
                 );
             }
-            let mut row_min = f32::MAX;
-            let mut row_max = f32::MIN;
             for (x, cell) in row.iter_mut().enumerate() {
                 let idx = y * w + x;
-                let mask = smoothstep(0.30, 0.50, land_mask[idx]);
+                let mask = smoothstep(mask_low, mask_high, land_mask[idx]);
                 let detail = noise.sample_detail(w as f32, h as f32, x, y);
-                let land_body = normalize01(detail + boundary[idx]) * 0.88 + 0.22;
+                let land_body =
+                    normalize01(detail + boundary[idx] * BOUNDARY_UPLIFT_SCALE) * 0.94 + 0.12;
                 let v = land_body * mask + (1.0 - mask) * OCEAN_FLOOR;
                 *cell = v;
-                row_min = row_min.min(v);
-                row_max = row_max.max(v);
             }
-            (row_min, row_max)
-        })
-        .reduce(
-            || (f32::MAX, f32::MIN),
-            |(a_min, a_max), (b_min, b_max)| (a_min.min(b_min), a_max.max(b_max)),
-        );
+        });
 
-    let range = (max_v - min_v).max(0.0001);
-    raw.par_iter_mut().for_each(|v| {
-        *v = (*v - min_v) / range;
-        *v = (*v * LAND_COMPRESSION + LAND_UPLIFT).clamp(0.0, 1.0);
-    });
-
+    normalize_land_elevation(&mut raw, &land_mask, w, h, mask_low, mask_high, config.sea_level);
     map.elevation.clone_from(&raw);
+}
+
+/// Spread elevation across the full land range without ocean depths compressing the scale.
+fn normalize_land_elevation(
+    raw: &mut [f32],
+    land_mask: &[f32],
+    w: usize,
+    h: usize,
+    mask_low: f32,
+    mask_high: f32,
+    _sea: f32,
+) {
+    let len = w * h;
+    let mut land_min = f32::MAX;
+    let mut land_max = f32::MIN;
+    let mut land_count = 0usize;
+
+    for idx in 0..len {
+        let influence = smoothstep(mask_low, mask_high, land_mask[idx]);
+        if influence < 0.15 {
+            continue;
+        }
+        land_count += 1;
+        land_min = land_min.min(raw[idx]);
+        land_max = land_max.max(raw[idx]);
+    }
+
+    if land_count == 0 {
+        return;
+    }
+
+    let span = (land_max - land_min).max(0.0001);
+    let floor = OCEAN_FLOOR;
+    let ceiling = 1.0;
+
+    for idx in 0..len {
+        let influence = smoothstep(mask_low, mask_high, land_mask[idx]);
+        if influence < 0.15 {
+            raw[idx] = floor;
+            continue;
+        }
+
+        let t = ((raw[idx] - land_min) / span).clamp(0.0, 1.0);
+        let stretched = t.powf(0.42);
+        let elev = floor + stretched * (ceiling - floor);
+        raw[idx] = (elev * LAND_COMPRESSION + LAND_UPLIFT).clamp(floor, ceiling);
+    }
 }

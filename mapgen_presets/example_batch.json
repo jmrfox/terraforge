@@ -4,9 +4,7 @@
     "height": 512,
     "seed": 42,
     "plate_count": 24,
-    "land_mask_method": "Hybrid",
-    "coast_sharpening": 0.7,
-    "river_flow_threshold": 55
+    "land_mask_method": "Hybrid"
   },
   "variants": [
     {

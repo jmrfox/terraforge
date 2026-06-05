@@ -22,7 +22,29 @@ let map = generate_world(&WorldGenConfig::default());
 
 ```bash
 cargo run --bin mapgen -- -o out/map.png --width 512 --seed 42 --stats
+cargo run --bin mapgen -- -o out/map.tiff --format tiff --width 512 --seed 42 --stats
 cargo run --bin mapgen -- --batch mapgen_presets/example_batch.json --out-dir out/ --stats
+cargo run --bin mapgen -- --batch mapgen_presets/example_batch.json --out-dir out/ --format tiff --stats
+```
+
+Multi-page TIFF output (use `--format tiff` or a `.tiff`/`.tif` extension). By default nine pages are written:
+
+| Page | Layer | Encoding |
+|------|-------|----------|
+| 0 | Biome preview (rivers overlaid) | RGB8 |
+| 1 | Elevation | 16-bit gray, `[0,1]` → full range |
+| 2 | Temperature | 16-bit gray |
+| 3 | Rainfall | 16-bit gray |
+| 4 | Biome ID | 16-bit gray (0–10, legend in TIFF metadata) |
+| 5 | Plate ID | 16-bit gray |
+| 6 | Water mask | 8-bit gray |
+| 7 | River mask | 8-bit gray |
+| 8 | Mountain mask | 8-bit gray |
+
+Use `--tiff-layers default` for the legacy two-page export (biomes + elevation only), or pick layers explicitly:
+
+```bash
+cargo run --bin mapgen -- -o out/climate.tiff --format tiff --tiff-layers elevation,temperature,rainfall
 ```
 
 Release builds are faster for large maps:

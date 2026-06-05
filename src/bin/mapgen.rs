@@ -2,6 +2,7 @@
 //!
 //! ```bash
 //! cargo run --bin mapgen -- -o out/map.png --width 512 --seed 42
+//! cargo run --bin mapgen -- -o out/map.tiff --format tiff --width 512 --seed 42
 //! cargo run --bin mapgen -- --batch presets.json --out-dir out/ --stats
 //! ```
 
@@ -10,19 +11,47 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 
 use terraforge::{
-    WorldGenConfig, compute_map_stats, generate_world, write_map_png, write_map_stats,
+    MapExportFormat, TiffLayerSet, WorldGenConfig, compute_map_stats, generate_world,
+    write_map_stats, write_map_with_tiff_layers,
 };
 
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum FormatArg {
+    #[default]
+    Auto,
+    Png,
+    Tiff,
+}
+
+impl FormatArg {
+    fn resolve(self, output: &Path) -> MapExportFormat {
+        match self {
+            Self::Auto => MapExportFormat::from_path(output),
+            Self::Png => MapExportFormat::Png,
+            Self::Tiff => MapExportFormat::Tiff,
+        }
+    }
+}
+
 #[derive(Parser)]
-#[command(name = "mapgen", about = "Generate procedural map PNGs without running the game")]
+#[command(name = "mapgen", about = "Generate procedural map previews (PNG or multi-page TIFF)")]
 struct Cli {
-    /// Output PNG path (single-run mode).
+    /// Output path (single-run mode). Extension `.tiff`/`.tif` selects TIFF unless `--format` overrides.
     #[arg(short, long, conflicts_with = "batch")]
     output: Option<PathBuf>,
+
+    /// Output raster format (`auto` uses the file extension).
+    #[arg(long, value_enum, default_value = "auto")]
+    format: FormatArg,
+
+    /// TIFF page selection (`full`, `default`, or comma-separated layer names).
+    /// Layers: biomes, elevation, temperature, rainfall, biome_id, plate_id, water, river, mountain.
+    #[arg(long, default_value = "full")]
+    tiff_layers: String,
 
     /// JSON config file (merged over defaults; CLI flags override file fields).
     #[arg(long, conflicts_with = "batch")]
@@ -66,8 +95,17 @@ struct ConfigParams {
     #[serde(alias = "mountain_slope_threshold")]
     mountain_slope: Option<f32>,
     #[arg(long)]
+    #[serde(alias = "mountain_cluster_threshold")]
+    mountain_cluster: Option<f32>,
+    #[arg(long)]
     #[serde(alias = "river_flow_threshold")]
     river_threshold: Option<f32>,
+    #[arg(long)]
+    #[serde(alias = "river_min_length")]
+    river_min_length: Option<u32>,
+    #[arg(long)]
+    #[serde(alias = "river_tributary_flow_threshold")]
+    river_tributary_threshold: Option<f32>,
     #[arg(long)]
     #[serde(alias = "temperature_scale")]
     temperature: Option<f32>,
@@ -97,6 +135,14 @@ struct ConfigParams {
     river_meander_strength: Option<f32>,
     #[arg(long)]
     hybrid_noise_blend: Option<f32>,
+    #[arg(long)]
+    land_mask_scale: Option<f64>,
+    #[arg(long)]
+    #[serde(alias = "ca_coarse_factor")]
+    ca_coarse: Option<u32>,
+    #[arg(long)]
+    #[serde(alias = "mountain_coast_buffer")]
+    mountain_coast_buffer: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -136,8 +182,17 @@ impl ConfigParams {
         if let Some(v) = self.mountain_slope {
             config.mountain_slope_threshold = v;
         }
+        if let Some(v) = self.mountain_cluster {
+            config.mountain_cluster_threshold = v;
+        }
         if let Some(v) = self.river_threshold {
             config.river_flow_threshold = v;
+        }
+        if let Some(v) = self.river_min_length {
+            config.river_min_length = v;
+        }
+        if let Some(v) = self.river_tributary_threshold {
+            config.river_tributary_flow_threshold = v;
         }
         if let Some(v) = self.temperature {
             config.temperature_scale = v;
@@ -173,6 +228,15 @@ impl ConfigParams {
         }
         if let Some(v) = self.hybrid_noise_blend {
             config.hybrid_noise_blend = v;
+        }
+        if let Some(v) = self.land_mask_scale {
+            config.land_mask_scale = v;
+        }
+        if let Some(v) = self.ca_coarse {
+            config.ca_coarse_factor = v;
+        }
+        if let Some(v) = self.mountain_coast_buffer {
+            config.mountain_coast_buffer = v;
         }
         Ok(())
     }
@@ -213,7 +277,13 @@ fn stats_path_from_flag(output: &Path, stats_arg: &Option<Option<String>>) -> Op
     }
 }
 
-fn run_single(config: &WorldGenConfig, output: &Path, stats_arg: &Option<Option<String>>) -> Result<u64, String> {
+fn run_single(
+    config: &WorldGenConfig,
+    output: &Path,
+    format: MapExportFormat,
+    tiff_layers: TiffLayerSet,
+    stats_arg: &Option<Option<String>>,
+) -> Result<u64, String> {
     eprintln!(
         "Generating {}x{} seed={} ...",
         config.width, config.height, config.seed
@@ -222,7 +292,8 @@ fn run_single(config: &WorldGenConfig, output: &Path, stats_arg: &Option<Option<
     let map = generate_world(config);
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
-    write_map_png(&map, output).map_err(|e| format!("write {}: {e}", output.display()))?;
+    write_map_with_tiff_layers(&map, output, format, tiff_layers)
+        .map_err(|e| format!("write {}: {e}", output.display()))?;
     eprintln!("Wrote {} ({elapsed_ms} ms)", output.display());
 
     if let Some(stats_path) = stats_path_from_flag(output, stats_arg) {
@@ -235,10 +306,11 @@ fn run_single(config: &WorldGenConfig, output: &Path, stats_arg: &Option<Option<
     Ok(elapsed_ms)
 }
 
-fn run_batch(cli: &Cli) -> Result<(), String> {
+fn run_batch(cli: &Cli, tiff_layers: TiffLayerSet) -> Result<(), String> {
     let batch_path = cli.batch.as_ref().expect("batch path");
     let out_dir = cli.out_dir.as_ref().expect("out_dir");
     let write_stats = cli.stats.is_some();
+    let format = cli.format.resolve(Path::new("placeholder"));
 
     let text =
         fs::read_to_string(batch_path).map_err(|e| format!("read {}: {e}", batch_path.display()))?;
@@ -253,7 +325,7 @@ fn run_batch(cli: &Cli) -> Result<(), String> {
         manifest.base.apply_to(&mut config)?;
         variant.patch.apply_to(&mut config)?;
 
-        let png_path = out_dir.join(format!("{}.png", variant.name));
+        let output_path = out_dir.join(format!("{}.{}", variant.name, format.extension()));
         eprintln!(
             "Variant {}: {}x{} seed={} ...",
             variant.name, config.width, config.height, config.seed
@@ -263,10 +335,10 @@ fn run_batch(cli: &Cli) -> Result<(), String> {
         let map = generate_world(&config);
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
-        match write_map_png(&map, &png_path) {
-            Ok(()) => eprintln!("  Wrote {} ({elapsed_ms} ms)", png_path.display()),
+        match write_map_with_tiff_layers(&map, &output_path, format, tiff_layers) {
+            Ok(()) => eprintln!("  Wrote {} ({elapsed_ms} ms)", output_path.display()),
             Err(e) => {
-                eprintln!("  ERROR {}: {e}", png_path.display());
+                eprintln!("  ERROR {}: {e}", output_path.display());
                 failures += 1;
                 continue;
             }
@@ -294,8 +366,16 @@ fn run_batch(cli: &Cli) -> Result<(), String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    let tiff_layers = match TiffLayerSet::parse(&cli.tiff_layers) {
+        Ok(layers) => layers,
+        Err(e) => {
+            eprintln!("error: invalid --tiff-layers: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
     let result = if cli.batch.is_some() {
-        run_batch(&cli)
+        run_batch(&cli, tiff_layers)
     } else {
         let output = match cli.output {
             Some(ref p) => p.clone(),
@@ -305,7 +385,10 @@ fn main() -> ExitCode {
             }
         };
         match build_config(&cli) {
-            Ok(config) => run_single(&config, &output, &cli.stats).map(|_| ()),
+            Ok(config) => {
+                let format = cli.format.resolve(&output);
+                run_single(&config, &output, format, tiff_layers, &cli.stats).map(|_| ())
+            }
             Err(e) => Err(e),
         }
     };

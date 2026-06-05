@@ -18,7 +18,11 @@ mod temperature;
 mod world;
 
 pub use colors::{LEGEND_ENTRIES, RIVER_RGBA, biome_rgba};
-pub use preview::{MapStats, compute_map_stats, map_to_rgba8, write_map_png, write_map_stats};
+pub use preview::{
+    MapExportFormat, MapStats, TiffLayerSet, biome_to_id, compute_map_stats, floats_to_gray16,
+    map_biome_id_to_gray16, map_elevation_to_gray16, map_to_rgba8, write_map,
+    write_map_png, write_map_stats, write_map_tiff, write_map_with_tiff_layers,
+};
 pub use config::{LandMaskMethod, WindDirection, WorldGenConfig};
 pub use plates::{Plate, PlateData};
 pub use progress::{GenProgressReport, ProgressHandle, new_progress_handle};
@@ -194,5 +198,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn generates_mountain_biome() {
+        let config = WorldGenConfig {
+            width: 512,
+            height: 512,
+            seed: 42,
+            ..Default::default()
+        };
+        let map = generate_world(&config);
+        let mountains = map
+            .biome
+            .iter()
+            .filter(|&&b| b == Biome::Mountain)
+            .count();
+        assert!(mountains > 0, "expected mountain biome cells, got {mountains}");
+        assert!(
+            mountains < 50_000,
+            "expected selective mountain biome, got {mountains}"
+        );
     }
 }

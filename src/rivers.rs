@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
@@ -159,6 +161,16 @@ pub fn generate_rivers(
     }
 
     let min_length = config.river_min_length;
+    let tributary_threshold = config.river_tributary_flow_threshold;
+
+    let mut upstream: Vec<Vec<usize>> = vec![Vec::new(); len];
+    for idx in 0..len {
+        if let Some(down) = downslope[idx] {
+            upstream[down].push(idx);
+        }
+    }
+
+    let mut trunk_cells = Vec::new();
     for idx in 0..len {
         if !map.water_mask[idx]
             && flow[idx] >= config.river_flow_threshold
@@ -167,6 +179,20 @@ pub fn generate_rivers(
             && river_terminates_in_water(map, idx, config)
         {
             map.river_mask[idx] = true;
+            trunk_cells.push(idx);
+        }
+    }
+
+    let mut queue: VecDeque<usize> = trunk_cells.into_iter().collect();
+    while let Some(current) = queue.pop_front() {
+        for &up in &upstream[current] {
+            if map.water_mask[up] || map.river_mask[up] {
+                continue;
+            }
+            if flow[up] >= tributary_threshold {
+                map.river_mask[up] = true;
+                queue.push_back(up);
+            }
         }
     }
 }
@@ -238,5 +264,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn upstream_tracing_extends_rivers() {
+        let base = WorldGenConfig::test_config(2, 32);
+        let mut map_full = simple_slope_map(32);
+        let config_full = WorldGenConfig {
+            river_flow_threshold: 5.0,
+            river_min_length: 2,
+            river_tributary_flow_threshold: 2.0,
+            sea_level: 0.05,
+            river_meander_strength: 0.0,
+            ..base.clone()
+        };
+        generate_oceans(&mut map_full, &config_full);
+        generate_rivers(&mut map_full, &config_full, &None, 0.0, 1.0);
+        let full_count = map_full.river_mask.iter().filter(|&&r| r).count();
+
+        let mut map_trunk = simple_slope_map(32);
+        let config_trunk = WorldGenConfig {
+            river_tributary_flow_threshold: f32::MAX,
+            ..config_full
+        };
+        generate_oceans(&mut map_trunk, &config_trunk);
+        generate_rivers(&mut map_trunk, &config_trunk, &None, 0.0, 1.0);
+        let trunk_count = map_trunk.river_mask.iter().filter(|&&r| r).count();
+
+        assert!(
+            full_count > trunk_count,
+            "upstream tracing should extend rivers (full={full_count}, trunk={trunk_count})"
+        );
     }
 }

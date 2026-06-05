@@ -15,6 +15,12 @@ pub fn sharpen_elevation(map: &mut WorldMap, config: &WorldGenConfig) {
     let steepness = 2.0 + sharpening * 6.0;
 
     for v in &mut map.elevation {
+        let dist_from_sea = (*v - sea).abs();
+        if dist_from_sea > band_width * 2.5 {
+            *v = v.clamp(0.0, 1.0);
+            continue;
+        }
+
         let t = (*v - sea) / band_width;
         *v = (sea + t.tanh() * steepness * band_width * 0.5).clamp(0.0, 1.0);
     }
