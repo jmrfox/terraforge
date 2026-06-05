@@ -1,0 +1,38 @@
+{
+  "base": {
+    "width": 512,
+    "height": 512,
+    "seed": 42,
+    "plate_count": 24,
+    "land_mask_method": "Hybrid",
+    "coast_sharpening": 0.7,
+    "river_flow_threshold": 55
+  },
+  "variants": [
+    {
+      "name": "method_noise",
+      "land_mask_method": "Noise"
+    },
+    {
+      "name": "method_ca",
+      "land_mask_method": "CellularAutomata"
+    },
+    {
+      "name": "method_drunkard",
+      "land_mask_method": "DrunkardsWalk"
+    },
+    {
+      "name": "method_hybrid",
+      "land_mask_method": "Hybrid"
+    },
+    {
+      "name": "sea_034",
+      "sea_level": 0.34
+    },
+    {
+      "name": "sea_042",
+      "sea_level": 0.42,
+      "seed": 7
+    }
+  ]
+}
