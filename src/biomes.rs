@@ -1,9 +1,7 @@
-use std::collections::VecDeque;
-
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
-use super::config::WorldGenConfig;
+use super::config::{ResolvedSimParams, WorldGenConfig};
 use super::progress::{ProgressHandle, report_stage};
 use super::world::{Biome, WorldMap};
 
@@ -36,58 +34,55 @@ fn interior_slope_at(
     max_delta
 }
 
-/// Chebyshev distance from each cell to the nearest water cell.
-fn distance_to_water(width: usize, height: usize, water: &[bool]) -> Vec<u32> {
-    let len = width * height;
-    let mut dist = vec![u32::MAX; len];
-    let mut queue = VecDeque::new();
+fn is_interior_land(dist_to_water: &[u32], idx: usize, buffer: u32) -> bool {
+    dist_to_water[idx] >= buffer
+}
 
-    for idx in 0..len {
-        if water[idx] {
-            dist[idx] = 0;
-            queue.push_back(idx);
-        }
-    }
-
-    while let Some(idx) = queue.pop_front() {
-        let x = idx % width;
-        let y = idx / width;
-        let next_dist = dist[idx] + 1;
-        for (dx, dy) in DIRS {
+/// Peak orogeny within a small Chebyshev neighborhood (spreads tectonic belts).
+fn local_orogeny_peak(
+    orogeny: &[f32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    radius: i32,
+) -> f32 {
+    let mut peak = 0.0f32;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
             let nx = x as i32 + dx;
             let ny = y as i32 + dy;
             if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
                 continue;
             }
             let nidx = ny as usize * width + nx as usize;
-            if next_dist < dist[nidx] {
-                dist[nidx] = next_dist;
-                queue.push_back(nidx);
-            }
+            peak = peak.max(orogeny[nidx]);
         }
     }
-
-    dist
+    peak
 }
 
-fn is_interior_land(dist_to_water: &[u32], idx: usize, buffer: u32) -> bool {
-    dist_to_water[idx] >= buffer
-}
-
-pub fn compute_mountain_mask(map: &mut WorldMap, config: &WorldGenConfig) {
+pub fn compute_mountain_mask(
+    map: &mut WorldMap,
+    config: &WorldGenConfig,
+    params: &ResolvedSimParams,
+) {
     let width = map.width;
     let height = map.height;
     let water_mask = map.water_mask.as_slice();
     let elevation = map.elevation.as_slice();
-    let elev_threshold = config.mountain_elevation_threshold;
-    let slope_threshold = config.mountain_slope_threshold;
+    let orogeny = map.orogeny.as_slice();
+    let elev_threshold = params.mountain_elev_norm;
+    let slope_threshold = params.mountain_slope_norm;
+    let orogeny_threshold = config.orogeny_mountain_threshold;
     let cluster_threshold = config.mountain_cluster_threshold;
-    let coast_buffer = config.mountain_coast_buffer;
-    let dist_to_water = distance_to_water(width, height, water_mask);
+    let coast_buffer = params.mountain_coast_buffer_cells;
+    let use_orogeny = config.use_orogeny_mountains;
+    let dist_to_water = map.dist_to_water.as_slice();
 
     let mountain_noise = Fbm::<Perlin>::new(config.seed as u32 + 1)
         .set_octaves(3)
-        .set_frequency(config.mountain_noise_frequency)
+        .set_frequency(params.mountain_noise_frequency)
         .set_lacunarity(2.0)
         .set_persistence(0.5);
 
@@ -104,17 +99,44 @@ pub fn compute_mountain_mask(map: &mut WorldMap, config: &WorldGenConfig) {
                 if !is_interior_land(&dist_to_water, idx, coast_buffer) {
                     continue;
                 }
-                let high = elevation[idx] > elev_threshold;
-                if !high {
-                    continue;
+                if use_orogeny {
+                    let belt_orogeny = local_orogeny_peak(
+                        orogeny,
+                        width,
+                        height,
+                        x,
+                        y,
+                        params.orogeny_peak_radius_cells,
+                    );
+                    if belt_orogeny <= orogeny_threshold {
+                        continue;
+                    }
+                    let elev_cutoff =
+                        (elev_threshold - belt_orogeny * 0.12).clamp(0.42, elev_threshold);
+                    if elevation[idx] <= elev_cutoff {
+                        continue;
+                    }
+                    let steep =
+                        interior_slope_at(width, height, elevation, water_mask, x, y)
+                            > slope_threshold;
+                    let strong_belt = belt_orogeny > orogeny_threshold * 1.8;
+                    *cell = steep || strong_belt;
+                } else {
+                    if elevation[idx] <= elev_threshold {
+                        continue;
+                    }
+                    let steep =
+                        interior_slope_at(width, height, elevation, water_mask, x, y)
+                            > slope_threshold;
+                    if !steep {
+                        continue;
+                    }
+                    let nx = x as f64 / width as f64;
+                    let ny = y as f64 / height as f64;
+                    let m = mountain_noise.get([nx, ny]) as f32;
+                    let cluster = ((m + 1.0) * 0.5) > cluster_threshold;
+                    *cell = cluster;
                 }
-                let nx = x as f64 / width as f64;
-                let ny = y as f64 / height as f64;
-                let m = mountain_noise.get([nx, ny]) as f32;
-                let cluster = ((m + 1.0) * 0.5) > cluster_threshold;
-                let steep = interior_slope_at(width, height, elevation, water_mask, x, y)
-                    > slope_threshold;
-                *cell = steep && cluster;
             }
         });
 
@@ -144,7 +166,7 @@ fn dilate_mountain_mask(
                     continue;
                 }
                 let nidx = ny as usize * width + nx as usize;
-                if src[nidx] {
+                if src[nidx] && is_interior_land(dist_to_water, nidx, coast_buffer) {
                     mask[idx] = true;
                     break;
                 }
@@ -191,11 +213,12 @@ fn assign_land_biome(temp: f32, rain: f32, mountain: bool) -> Biome {
 pub fn generate_biomes(
     map: &mut WorldMap,
     config: &WorldGenConfig,
+    params: &ResolvedSimParams,
     progress: &Option<ProgressHandle>,
     stage_start: f32,
     stage_end: f32,
 ) {
-    compute_mountain_mask(map, config);
+    compute_mountain_mask(map, config, params);
 
     let width = map.width;
     let height = map.height;
@@ -229,4 +252,43 @@ pub fn generate_biomes(
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate_world;
+
+    #[test]
+    fn orogeny_mountains_are_inland() {
+        let config = WorldGenConfig {
+            width: 512,
+            height: 512,
+            seed: 42,
+            use_orogeny_mountains: true,
+            ..Default::default()
+        };
+        let map = generate_world(&config);
+        let coast_buffer = config.resolve().mountain_coast_buffer_cells as usize;
+        let dist = &map.dist_to_water;
+
+        let mut coastal = 0usize;
+        let mut total = 0usize;
+        for (idx, &is_mountain) in map.mountain_mask.iter().enumerate() {
+            if !is_mountain {
+                continue;
+            }
+            total += 1;
+            if (dist[idx] as usize) < coast_buffer {
+                coastal += 1;
+            }
+        }
+
+        assert!(total > 0, "expected orogeny-driven mountain cells");
+        let coastal_fraction = coastal as f32 / total as f32;
+        assert!(
+            coastal_fraction < 0.05,
+            "expected mountains inland, but {coastal_fraction:.1}% are within coast buffer"
+        );
+    }
 }

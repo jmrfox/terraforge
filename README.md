@@ -18,6 +18,17 @@ use terraforge::{WorldGenConfig, generate_world};
 let map = generate_world(&WorldGenConfig::default());
 ```
 
+## Interactive GUI (`mapgui`)
+
+Tweak all generation parameters, preview biome/elevation/temperature/rainfall layers, and export PNG or JSON presets:
+
+```bash
+cargo run --features gui --bin mapgui
+cargo run --release --features gui --bin mapgui   # faster generation
+```
+
+The app auto-generates on startup (default 512×512). Use **Generate** after changing parameters. Load/save presets as JSON; export always writes the biome+rivers PNG.
+
 ## Headless map preview (`mapgen` CLI)
 
 ```bash

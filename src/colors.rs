@@ -14,7 +14,7 @@ pub fn biome_rgba(biome: Biome) -> [u8; 4] {
         Biome::Desert => [210, 185, 120, 255],
         Biome::Savanna => [175, 155, 70, 255],
         Biome::TropicalForest => [20, 120, 55, 255],
-        Biome::Mountain => [120, 110, 100, 255],
+        Biome::Mountain => [40, 50, 60, 255],
     }
 }
 

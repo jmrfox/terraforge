@@ -25,11 +25,11 @@
     },
     {
       "name": "sea_034",
-      "sea_level": 0.34
+      "sea_level_m": -900.0
     },
     {
       "name": "sea_042",
-      "sea_level": 0.42,
+      "sea_level_m": 300.0,
       "seed": 7
     }
   ]

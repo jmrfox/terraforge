@@ -1,16 +1,14 @@
-use super::config::WorldGenConfig;
+use super::config::{LandGenerationMode, ResolvedSimParams, WorldGenConfig};
 use super::world::WorldMap;
 
-const OCEAN_PROXIMITY: usize = 4;
-
 /// Collapse the ambiguous elevation band around sea level before water classification.
-pub fn sharpen_elevation(map: &mut WorldMap, config: &WorldGenConfig) {
-    let sharpening = config.coast_sharpening;
+pub fn sharpen_elevation(map: &mut WorldMap, config: &WorldGenConfig, params: &ResolvedSimParams) {
+    let sharpening = config.effective_coast_sharpening();
     if sharpening <= 0.001 {
         return;
     }
 
-    let sea = config.sea_level;
+    let sea = params.sea_level_norm;
     let band_width = (0.12 * (1.0 - sharpening * 0.85)).max(0.015);
     let steepness = 2.0 + sharpening * 6.0;
 
@@ -27,10 +25,21 @@ pub fn sharpen_elevation(map: &mut WorldMap, config: &WorldGenConfig) {
 }
 
 /// Remove orphan land specks and tiny coastal water flecks after initial water classification.
-pub fn cleanup_coastal_specks(map: &mut WorldMap, ocean_mask: &[bool], config: &WorldGenConfig) {
+pub fn cleanup_coastal_specks(
+    map: &mut WorldMap,
+    ocean_mask: &[bool],
+    config: &WorldGenConfig,
+    params: &ResolvedSimParams,
+) {
     let w = map.width;
     let h = map.height;
-    let passes = config.coast_cleanup_passes;
+    let passes = if config.land_generation == LandGenerationMode::TectonicBase
+        && !config.legacy_coast_cleanup
+    {
+        1
+    } else {
+        config.coast_cleanup_passes
+    };
 
     for _ in 0..passes {
         let water = map.water_mask.clone();
@@ -47,7 +56,16 @@ pub fn cleanup_coastal_specks(map: &mut WorldMap, ocean_mask: &[bool], config: &
                 }
 
                 let land_neighbors = land_neighbor_count(&water, w, h, x, y);
-                if land_neighbors < 3 && near_ocean(ocean_mask, w, h, x, y, OCEAN_PROXIMITY) {
+                if land_neighbors < 3
+                    && near_ocean(
+                        ocean_mask,
+                        w,
+                        h,
+                        x,
+                        y,
+                        params.coast_proximity_cells,
+                    )
+                {
                     next[idx] = true;
                 }
             }
@@ -112,7 +130,8 @@ mod tests {
             ocean[y * 16 + 15] = true;
         }
 
-        cleanup_coastal_specks(&mut map, &ocean, &config);
+        let params = config.resolve();
+        cleanup_coastal_specks(&mut map, &ocean, &config, &params);
         assert!(
             map.water_mask[1 * 16 + 1],
             "isolated land speck near ocean should become water"

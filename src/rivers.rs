@@ -1,9 +1,10 @@
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
-use super::config::WorldGenConfig;
+use super::config::{ResolvedSimParams, WorldGenConfig};
 use super::progress::{ProgressHandle, report, report_stage};
 use super::world::{Biome, WorldMap};
 
@@ -86,6 +87,7 @@ fn downslope_neighbor(map: &WorldMap, x: usize, y: usize, meander: &MeanderField
 pub fn generate_rivers(
     map: &mut WorldMap,
     config: &WorldGenConfig,
+    params: &ResolvedSimParams,
     progress: &Option<ProgressHandle>,
     stage_start: f32,
     stage_end: f32,
@@ -135,33 +137,56 @@ pub fn generate_rivers(
         stage_start + (stage_end - stage_start) * 0.55,
         "Carving river networks (flow accumulation)",
     );
-    land_cells.sort_by(|&a, &b| {
-        map.elevation[b]
-            .partial_cmp(&map.elevation[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
+    let elevation = map.elevation.as_slice();
+    land_cells.par_sort_by(|&a, &b| {
+        elevation[b]
+            .partial_cmp(&elevation[a])
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.cmp(&b))
     });
 
-    let mut flow = vec![1.0f32; len];
+    let use_cached_flow = map.flow_accumulation.iter().any(|&f| f > 1.0);
+    let mut flow = if use_cached_flow {
+        map.flow_accumulation.clone()
+    } else {
+        vec![1.0f32; len]
+    };
     let mut chain_length = vec![1u32; len];
     let land_len = land_cells.len().max(1);
-    for (i, &idx) in land_cells.iter().enumerate() {
-        if i % 256 == 0 {
-            report_stage(
-                progress,
-                stage_start,
-                stage_end,
-                0.55 + (i as f32 / land_len as f32) * 0.45,
-                "Carving river networks (flow accumulation)",
-            );
+    if !use_cached_flow {
+        for (i, &idx) in land_cells.iter().enumerate() {
+            if i % 256 == 0 {
+                report_stage(
+                    progress,
+                    stage_start,
+                    stage_end,
+                    0.55 + (i as f32 / land_len as f32) * 0.45,
+                    "Carving river networks (flow accumulation)",
+                );
+            }
+            if let Some(down) = downslope[idx] {
+                flow[down] += flow[idx];
+                chain_length[down] = chain_length[down].max(chain_length[idx] + 1);
+            }
         }
-        if let Some(down) = downslope[idx] {
-            flow[down] += flow[idx];
-            chain_length[down] = chain_length[down].max(chain_length[idx] + 1);
+    } else {
+        for &idx in &land_cells {
+            if let Some(down) = downslope[idx] {
+                chain_length[down] = chain_length[down].max(chain_length[idx] + 1);
+            }
         }
     }
 
-    let min_length = config.river_min_length;
-    let tributary_threshold = config.river_tributary_flow_threshold;
+    if !map.flow_downslope.iter().all(|d| d.is_none()) {
+        for idx in 0..len {
+            if downslope[idx].is_none() {
+                downslope[idx] = map.flow_downslope[idx];
+            }
+        }
+    }
+
+    let min_length = params.river_min_length_cells;
+    let tributary_threshold = params.river_tributary_threshold_cells;
 
     let mut upstream: Vec<Vec<usize>> = vec![Vec::new(); len];
     for idx in 0..len {
@@ -173,7 +198,7 @@ pub fn generate_rivers(
     let mut trunk_cells = Vec::new();
     for idx in 0..len {
         if !map.water_mask[idx]
-            && flow[idx] >= config.river_flow_threshold
+            && flow[idx] >= params.river_flow_threshold_cells
             && downslope[idx].is_some()
             && chain_length[idx] >= min_length
             && river_terminates_in_water(map, idx, config)
@@ -194,6 +219,34 @@ pub fn generate_rivers(
                 queue.push_back(up);
             }
         }
+    }
+
+    if config.river_incision_enabled {
+        apply_river_incision(map, &flow, config, params);
+    }
+}
+
+/// Carve shallow channels along river cells proportional to flow accumulation.
+fn apply_river_incision(
+    map: &mut WorldMap,
+    flow: &[f32],
+    config: &WorldGenConfig,
+    params: &ResolvedSimParams,
+) {
+    let sea = params.sea_level_norm;
+    let floor = params.ocean_floor_norm;
+    let factor = config.river_incision_factor;
+    let threshold = params.river_flow_threshold_cells;
+
+    for idx in 0..map.width * map.height {
+        if !map.river_mask[idx] || map.water_mask[idx] {
+            continue;
+        }
+        if map.elevation[idx] < sea + 0.02 {
+            continue;
+        }
+        let incision = factor * (flow[idx] / threshold).sqrt();
+        map.elevation[idx] = (map.elevation[idx] - incision).max(sea + 0.005).max(floor);
     }
 }
 
@@ -226,6 +279,7 @@ pub fn river_terminates_in_water(map: &WorldMap, start: usize, config: &WorldGen
 mod tests {
     use super::*;
     use crate::config::WorldGenConfig;
+    use crate::units::{Meters, SquareKilometers};
     use crate::oceans::generate_oceans;
     use crate::world::WorldMap;
 
@@ -245,14 +299,15 @@ mod tests {
         let config = WorldGenConfig::test_config(2, 32);
         let mut map = simple_slope_map(32);
         let config = WorldGenConfig {
-            river_flow_threshold: 5.0,
-            river_min_length: 2,
-            sea_level: 0.05,
+            sea_level_m: Meters(-5250.0),
+            river_min_drainage_area_km2: SquareKilometers(0.002),
+            river_min_length_m: Meters(40.0),
             river_meander_strength: 0.0,
             ..config
         };
-        generate_oceans(&mut map, &config);
-        generate_rivers(&mut map, &config, &None, 0.0, 1.0);
+        let params = config.resolve();
+        generate_oceans(&mut map, &config, &params);
+        generate_rivers(&mut map, &config, &params, &None, 0.0, 1.0);
 
         for y in 0..map.height {
             for x in 0..map.width {
@@ -271,24 +326,26 @@ mod tests {
         let base = WorldGenConfig::test_config(2, 32);
         let mut map_full = simple_slope_map(32);
         let config_full = WorldGenConfig {
-            river_flow_threshold: 5.0,
-            river_min_length: 2,
-            river_tributary_flow_threshold: 2.0,
-            sea_level: 0.05,
+            sea_level_m: Meters(-5250.0),
+            river_min_drainage_area_km2: SquareKilometers(0.002),
+            river_min_length_m: Meters(40.0),
+            river_tributary_drainage_area_km2: SquareKilometers(0.0008),
             river_meander_strength: 0.0,
             ..base.clone()
         };
-        generate_oceans(&mut map_full, &config_full);
-        generate_rivers(&mut map_full, &config_full, &None, 0.0, 1.0);
+        let params_full = config_full.resolve();
+        generate_oceans(&mut map_full, &config_full, &params_full);
+        generate_rivers(&mut map_full, &config_full, &params_full, &None, 0.0, 1.0);
         let full_count = map_full.river_mask.iter().filter(|&&r| r).count();
 
         let mut map_trunk = simple_slope_map(32);
         let config_trunk = WorldGenConfig {
-            river_tributary_flow_threshold: f32::MAX,
+            river_tributary_drainage_area_km2: SquareKilometers(1e9),
             ..config_full
         };
-        generate_oceans(&mut map_trunk, &config_trunk);
-        generate_rivers(&mut map_trunk, &config_trunk, &None, 0.0, 1.0);
+        let params_trunk = config_trunk.resolve();
+        generate_oceans(&mut map_trunk, &config_trunk, &params_trunk);
+        generate_rivers(&mut map_trunk, &config_trunk, &params_trunk, &None, 0.0, 1.0);
         let trunk_count = map_trunk.river_mask.iter().filter(|&&r| r).count();
 
         assert!(

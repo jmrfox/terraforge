@@ -1,7 +1,7 @@
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
-use super::config::{WindDirection, WorldGenConfig};
+use super::config::{ResolvedSimParams, WindDirection, WorldGenConfig};
 use super::progress::{ProgressHandle, report_stage};
 use super::world::{Biome, WorldMap};
 
@@ -9,28 +9,33 @@ fn normalize01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
-/// Simplified prevailing-wind moisture transport model.
+/// Simplified prevailing-wind moisture transport with orogeny rain shadows.
 pub fn generate_rainfall(
     map: &mut WorldMap,
     config: &WorldGenConfig,
+    params: &ResolvedSimParams,
     progress: &Option<ProgressHandle>,
     stage_start: f32,
     stage_end: f32,
 ) {
     let w = map.width;
     let h = map.height;
-    let mountain_orographic = 0.35;
+    let orographic_weight = config.orographic_orogeny_weight;
+    let interior_drying = config.interior_drying_factor;
+    let ocean_range = params.continentality_ocean_range_cells.max(1) as f32;
     let rain_noise = Fbm::<Perlin>::new((config.seed as u32).wrapping_add(5))
         .set_octaves(3)
         .set_frequency(2.2)
         .set_lacunarity(2.0)
         .set_persistence(0.4);
 
+    let dist_to_ocean = map.dist_to_water.as_slice();
+
     match config.wind_direction {
         WindDirection::WestToEast => {
             let water_mask = map.water_mask.clone();
             let biome = map.biome.clone();
-            let elevation = map.elevation.clone();
+            let orogeny = map.orogeny.clone();
             let rainfall_scale = config.rainfall_scale;
             let width_f = w as f32;
 
@@ -58,8 +63,11 @@ pub fn generate_rainfall(
                             continue;
                         }
 
-                        let orographic_loss = elevation[idx] * mountain_orographic;
+                        let orographic_loss = orogeny[idx] * orographic_weight;
                         moisture = (moisture - orographic_loss * 0.15).max(0.0);
+
+                        let interior = (dist_to_ocean[idx] as f32 / ocean_range).clamp(0.0, 1.0);
+                        moisture = (moisture - interior * interior_drying).max(0.0);
 
                         if x == 0 && biome[idx] == Biome::Ocean {
                             moisture = 1.0;

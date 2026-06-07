@@ -52,6 +52,7 @@ pub struct TiffLayerSet {
     pub water: bool,
     pub river: bool,
     pub mountain: bool,
+    pub orogeny: bool,
 }
 
 impl TiffLayerSet {
@@ -67,6 +68,7 @@ impl TiffLayerSet {
             water: false,
             river: false,
             mountain: false,
+            orogeny: false,
         }
     }
 
@@ -82,6 +84,7 @@ impl TiffLayerSet {
             water: true,
             river: true,
             mountain: true,
+            orogeny: true,
         }
     }
 
@@ -108,6 +111,7 @@ impl TiffLayerSet {
             water: false,
             river: false,
             mountain: false,
+            orogeny: false,
         };
         for part in spec.split(',') {
             let name = part.trim();
@@ -124,9 +128,10 @@ impl TiffLayerSet {
                 "water" | "water_mask" => set.water = true,
                 "river" | "rivers" | "river_mask" => set.river = true,
                 "mountain" | "mountains" | "mountain_mask" => set.mountain = true,
+                "orogeny" | "orogeny_mask" => set.orogeny = true,
                 other => {
                     return Err(format!(
-                        "unknown TIFF layer '{other}' (expected biomes, elevation, temperature, rainfall, biome_id, plate_id, water, river, mountain)"
+                        "unknown TIFF layer '{other}' (expected biomes, elevation, temperature, rainfall, biome_id, plate_id, water, river, mountain, orogeny)"
                     ));
                 }
             }
@@ -147,6 +152,7 @@ impl TiffLayerSet {
             || self.water
             || self.river
             || self.mountain
+            || self.orogeny
     }
 
     pub fn page_count(&self) -> usize {
@@ -160,6 +166,7 @@ impl TiffLayerSet {
             self.water,
             self.river,
             self.mountain,
+            self.orogeny,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -197,10 +204,289 @@ pub struct MapStats {
     pub config: WorldGenConfig,
     pub width: usize,
     pub height: usize,
+    pub cell_size_m: f64,
+    pub map_width_m: f64,
+    pub map_height_m: f64,
+    pub max_elevation_m: f64,
+    pub sea_level_m: f64,
     pub land_fraction: f64,
     pub ocean_fraction: f64,
     pub biomes: HashMap<String, usize>,
     pub elapsed_ms: u64,
+}
+
+/// Preview layer for GUI / interactive viewing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviewLayer {
+    #[default]
+    Biomes,
+    Elevation,
+    Plates,
+    Orogeny,
+    MacroLand,
+    Mountains,
+    Water,
+    Rivers,
+    Temperature,
+    Rainfall,
+    Drainage,
+    CoastDistance,
+}
+
+impl PreviewLayer {
+    pub const ALL: [Self; 12] = [
+        Self::Biomes,
+        Self::Elevation,
+        Self::Plates,
+        Self::Orogeny,
+        Self::MacroLand,
+        Self::Mountains,
+        Self::Water,
+        Self::Rivers,
+        Self::Temperature,
+        Self::Rainfall,
+        Self::Drainage,
+        Self::CoastDistance,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Biomes => "Biomes",
+            Self::Elevation => "Elevation",
+            Self::Plates => "Plates",
+            Self::Orogeny => "Orogeny",
+            Self::MacroLand => "Macro land",
+            Self::Mountains => "Mountains",
+            Self::Water => "Water",
+            Self::Rivers => "Rivers",
+            Self::Temperature => "Temperature",
+            Self::Rainfall => "Rainfall",
+            Self::Drainage => "Drainage",
+            Self::CoastDistance => "Coast dist",
+        }
+    }
+
+    /// Short legend text for the right panel (none for biome grid legend).
+    pub fn legend_hint(self) -> Option<&'static str> {
+        match self {
+            Self::Biomes => None,
+            Self::Elevation => Some("Grayscale: low → high elevation"),
+            Self::Plates => Some("Distinct color per tectonic plate"),
+            Self::Orogeny => Some("Grayscale: plate-boundary uplift intensity"),
+            Self::MacroLand => Some("Grayscale: continental crust macro mask"),
+            Self::Mountains => Some("Red: mountain cells; gray: other land"),
+            Self::Water => Some("Blue: ocean & lakes; tan: land"),
+            Self::Rivers => Some("River network on neutral background"),
+            Self::Temperature => Some("Grayscale: cold → warm"),
+            Self::Rainfall => Some("Grayscale: dry → wet"),
+            Self::Drainage => Some("Grayscale: low → high flow accumulation"),
+            Self::CoastDistance => Some("Grayscale: near coast → inland"),
+        }
+    }
+}
+
+/// Rasterize a world map to RGBA8 for interactive preview.
+pub fn map_to_preview_rgba8(map: &WorldMap, layer: PreviewLayer, rivers_overlay: bool) -> Vec<u8> {
+    match layer {
+        PreviewLayer::Biomes => map_to_rgba8(map),
+        PreviewLayer::Elevation => scalar_field_to_rgba8(&map.elevation, map, rivers_overlay),
+        PreviewLayer::Plates => plates_to_rgba8(map, rivers_overlay),
+        PreviewLayer::Orogeny => scalar_field_to_rgba8(&map.orogeny, map, rivers_overlay),
+        PreviewLayer::MacroLand => scalar_field_to_rgba8(&map.macro_land_mask, map, rivers_overlay),
+        PreviewLayer::Mountains => mountains_to_rgba8(map, rivers_overlay),
+        PreviewLayer::Water => water_to_rgba8(map, rivers_overlay),
+        PreviewLayer::Rivers => rivers_to_rgba8(map),
+        PreviewLayer::Temperature => scalar_field_to_rgba8(&map.temperature, map, rivers_overlay),
+        PreviewLayer::Rainfall => scalar_field_to_rgba8(&map.rainfall, map, rivers_overlay),
+        PreviewLayer::Drainage => drainage_to_rgba8(map, rivers_overlay),
+        PreviewLayer::CoastDistance => coast_distance_to_rgba8(map, rivers_overlay),
+    }
+}
+
+const LAND_NEUTRAL: [u8; 4] = [48, 48, 48, 255];
+const WATER_BLUE: [u8; 4] = [32, 64, 140, 255];
+const LAND_TAN: [u8; 4] = [160, 140, 100, 255];
+const MOUNTAIN_RED: [u8; 4] = [220, 80, 60, 255];
+
+fn hsv_to_rgba(h: f32, s: f32, v: f32) -> [u8; 4] {
+    let i = (h * 6.0).floor() as i32;
+    let f = h * 6.0 - i as f32;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - f * s);
+    let t = v * (1.0 - (1.0 - f) * s);
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    [
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+        255,
+    ]
+}
+
+fn plate_rgba(plate_id: u32) -> [u8; 4] {
+    let hue = (plate_id as f32 * 0.618_033_988_7) % 1.0;
+    hsv_to_rgba(hue, 0.62, 0.88)
+}
+
+fn plates_to_rgba8(map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let mut color = plate_rgba(map.plate_id[idx]);
+            if rivers_overlay && map.river_mask[idx] {
+                color = RIVER_RGBA;
+            }
+            px.copy_from_slice(&color);
+        });
+    pixels
+}
+
+fn mountains_to_rgba8(map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let mut color = if map.water_mask[idx] {
+                WATER_BLUE
+            } else if map.mountain_mask[idx] {
+                MOUNTAIN_RED
+            } else {
+                LAND_NEUTRAL
+            };
+            if rivers_overlay && map.river_mask[idx] {
+                color = RIVER_RGBA;
+            }
+            px.copy_from_slice(&color);
+        });
+    pixels
+}
+
+fn water_to_rgba8(map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let mut color = if map.water_mask[idx] {
+                WATER_BLUE
+            } else {
+                LAND_TAN
+            };
+            if rivers_overlay && map.river_mask[idx] {
+                color = RIVER_RGBA;
+            }
+            px.copy_from_slice(&color);
+        });
+    pixels
+}
+
+fn rivers_to_rgba8(map: &WorldMap) -> Vec<u8> {
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let color = if map.river_mask[idx] {
+                RIVER_RGBA
+            } else if map.water_mask[idx] {
+                [24, 24, 32, 255]
+            } else {
+                LAND_NEUTRAL
+            };
+            px.copy_from_slice(&color);
+        });
+    pixels
+}
+
+fn drainage_to_rgba8(map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
+    let max_flow = map
+        .flow_accumulation
+        .iter()
+        .cloned()
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let log_max = (1.0 + max_flow).ln();
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let norm = if log_max > 0.0 {
+                (1.0 + map.flow_accumulation[idx]).ln() / log_max
+            } else {
+                0.0
+            };
+            let v = (norm.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let mut color = [v, v, v, 255];
+            if rivers_overlay && map.river_mask[idx] {
+                color = RIVER_RGBA;
+            }
+            px.copy_from_slice(&color);
+        });
+    pixels
+}
+
+fn coast_distance_to_rgba8(map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
+    let max_dist = map
+        .dist_to_water
+        .iter()
+        .filter(|&&d| d < u32::MAX)
+        .max()
+        .copied()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let dist = map.dist_to_water[idx];
+            let norm = if dist >= u32::MAX {
+                1.0
+            } else {
+                (dist as f32 / max_dist).clamp(0.0, 1.0)
+            };
+            let v = (norm * 255.0).round() as u8;
+            let mut color = [v, v, v, 255];
+            if rivers_overlay && map.river_mask[idx] {
+                color = RIVER_RGBA;
+            }
+            px.copy_from_slice(&color);
+        });
+    pixels
+}
+
+fn scalar_field_to_rgba8(values: &[f32], map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
+    let len = map.width * map.height;
+    let mut pixels = vec![0u8; len * 4];
+    pixels
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(idx, px)| {
+            let v = (values[idx].clamp(0.0, 1.0) * 255.0).round() as u8;
+            let mut color = [v, v, v, 255];
+            if rivers_overlay && map.river_mask[idx] {
+                color = RIVER_RGBA;
+            }
+            px.copy_from_slice(&color);
+        });
+    pixels
 }
 
 /// Rasterize a world map to RGBA8 pixels (one pixel per cell).
@@ -447,6 +733,15 @@ pub fn write_map_tiff(map: &WorldMap, path: &Path, layers: TiffLayerSet) -> io::
             &bools_to_gray8(&map.mountain_mask),
         )?;
     }
+    if layers.orogeny {
+        write_tiff_gray16_page(
+            &mut encoder,
+            width,
+            height,
+            "orogeny",
+            &floats_to_gray16(&map.orogeny),
+        )?;
+    }
 
     writer.flush()?;
     Ok(())
@@ -463,10 +758,16 @@ pub fn compute_map_stats(map: &WorldMap, config: &WorldGenConfig, elapsed_ms: u6
         *biomes.entry(biome_label(biome).to_string()).or_insert(0) += 1;
     }
 
+    let params = config.resolve();
     MapStats {
         config: config.clone(),
         width: map.width,
         height: map.height,
+        cell_size_m: params.cell_size_m,
+        map_width_m: params.map_width_m,
+        map_height_m: params.map_height_m,
+        max_elevation_m: params.max_elevation_m,
+        sea_level_m: params.sea_level_m,
         land_fraction: land_cells as f64 / total as f64,
         ocean_fraction: ocean_cells as f64 / total as f64,
         biomes,
@@ -511,6 +812,19 @@ mod tests {
     }
 
     #[test]
+    fn map_to_preview_rgba8_all_layers_correct_length() {
+        let config = WorldGenConfig::test_config(1, 64);
+        let map = generate_world(&config);
+        let expected = 64 * 64 * 4;
+        for layer in PreviewLayer::ALL {
+            let pixels = map_to_preview_rgba8(&map, layer, true);
+            assert_eq!(pixels.len(), expected, "{layer:?}");
+            let pixels_no_rivers = map_to_preview_rgba8(&map, layer, false);
+            assert_eq!(pixels_no_rivers.len(), expected, "{layer:?} no rivers");
+        }
+    }
+
+    #[test]
     fn write_map_png_produces_valid_file() {
         let config = WorldGenConfig::test_config(2, 32);
         let map = generate_world(&config);
@@ -551,7 +865,7 @@ mod tests {
     #[test]
     fn tiff_layer_set_parse() {
         let full = TiffLayerSet::parse("full").unwrap();
-        assert_eq!(full.page_count(), 9);
+        assert_eq!(full.page_count(), 10);
 
         let custom = TiffLayerSet::parse("elevation,temperature").unwrap();
         assert_eq!(custom.page_count(), 2);
@@ -561,12 +875,12 @@ mod tests {
     }
 
     #[test]
-    fn write_map_tiff_default_layers_has_nine_pages() {
+    fn write_map_tiff_default_layers_has_ten_pages() {
         let config = WorldGenConfig::test_config(4, 32);
         let map = generate_world(&config);
         let path = std::env::temp_dir().join("terraforge_mapgen_test_full.tiff");
         write_map_tiff(&map, &path, TiffLayerSet::full()).expect("write tiff");
-        assert_eq!(count_tiff_pages(&path), 9);
+        assert_eq!(count_tiff_pages(&path), 10);
         let _ = std::fs::remove_file(path);
     }
 
