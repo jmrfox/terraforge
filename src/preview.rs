@@ -337,12 +337,35 @@ fn plate_rgba(plate_id: u32) -> [u8; 4] {
 
 fn plates_to_rgba8(map: &WorldMap, rivers_overlay: bool) -> Vec<u8> {
     let len = map.width * map.height;
+    let w = map.width;
+    let h = map.height;
     let mut pixels = vec![0u8; len * 4];
     pixels
         .par_chunks_mut(4)
         .enumerate()
         .for_each(|(idx, px)| {
-            let mut color = plate_rgba(map.plate_id[idx]);
+            let x = idx % w;
+            let y = idx / w;
+            let my_plate = map.plate_id[idx];
+            // Check if any neighbor has a different plate ID
+            let mut is_boundary = false;
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let nidx = ny as usize * w + nx as usize;
+                if map.plate_id[nidx] != my_plate {
+                    is_boundary = true;
+                    break;
+                }
+            }
+            let mut color = if is_boundary {
+                [255u8, 255, 255, 255] // White boundary
+            } else {
+                [0u8, 0, 0, 255] // Black interior
+            };
             if rivers_overlay && map.river_mask[idx] {
                 color = RIVER_RGBA;
             }

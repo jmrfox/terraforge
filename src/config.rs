@@ -27,8 +27,6 @@ pub enum LandGenerationMode {
     /// Crust + plate-boundary uplift define continents; texture adds coast detail.
     #[default]
     TectonicBase,
-    /// Legacy mask-primary elevation blend (regression / comparison).
-    LegacyMask,
 }
 
 /// User-facing configuration in physical units where applicable.
@@ -135,6 +133,16 @@ pub struct WorldGenConfig {
     pub shelf_width_m: Meters,
     pub shelf_depth_m: Meters,
 
+    // --- Subduction zones ---
+    /// Depth of oceanic trench below abyssal floor (physical meters, default: 800m)
+    pub trench_depth_m: Meters,
+    /// Width of trench depression from plate boundary (physical meters, default: 80m)
+    pub trench_width_m: Meters,
+    /// Width of back-arc volcanic uplift belt from coast (physical meters, default: 120m)
+    pub volcanic_arc_width_m: Meters,
+    /// Target elevation for volcanic arc above sea level (physical meters, default: 1500m)
+    pub volcanic_arc_elevation_m: Meters,
+
     // --- Plates (Phase 1 Tier B) ---
     pub plate_lloyd_iterations: u32,
     pub continental_plate_speed_max: f32,
@@ -148,7 +156,6 @@ pub struct WorldGenConfig {
     pub continentality_ocean_range_m: Meters,
 
     // --- Process-driven geography ---
-    pub land_generation: LandGenerationMode,
     pub tectonic_uplift_scale: f32,
     pub land_texture_strength_m: Meters,
     pub land_texture_coast_band_m: Meters,
@@ -211,6 +218,12 @@ pub struct ResolvedSimParams {
     pub shelf_depth_norm: f32,
     pub continental_base_norm: f32,
     pub abyssal_base_norm: f32,
+
+    // --- Subduction zone resolved parameters ---
+    pub trench_depth_norm: f32,
+    pub trench_width_cells: u32,
+    pub volcanic_arc_width_cells: u32,
+    pub volcanic_arc_elevation_norm: f32,
     pub continentality_ocean_range_cells: u32,
 
     pub land_texture_strength_norm: f32,
@@ -387,6 +400,13 @@ impl WorldGenConfig {
             shelf_depth_norm: (self.shelf_depth_m.0 / elev_span) as f32,
             continental_base_norm: (sea_level_norm + 0.06).min(0.92),
             abyssal_base_norm: (sea_level_norm * 0.35).max(0.04),
+
+            // Subduction zone resolved parameters (physical -> normalized/cells)
+            trench_depth_norm: (self.trench_depth_m.0 / elev_span) as f32,
+            trench_width_cells: self.trench_width_m.to_cells(cell).max(1),
+            volcanic_arc_width_cells: self.volcanic_arc_width_m.to_cells(cell).max(1),
+            volcanic_arc_elevation_norm: (self.volcanic_arc_elevation_m.0 / elev_span) as f32,
+
             continentality_ocean_range_cells: self
                 .continentality_ocean_range_m
                 .to_cells(cell)
@@ -450,13 +470,6 @@ impl WorldGenConfig {
         }
     }
 
-    pub fn effective_coast_sharpening(&self) -> f32 {
-        if self.land_generation == LandGenerationMode::TectonicBase {
-            0.0
-        } else {
-            self.coast_sharpening
-        }
-    }
 
 }
 
@@ -477,7 +490,7 @@ impl Default for WorldGenConfig {
             continental_margin_m: Meters(200.0),
             min_isthmus_width_m: Meters(120.0),
             mountain_belt_width_m: Meters(60.0),
-            mountain_coast_buffer_m: Meters(120.0),
+            mountain_coast_buffer_m: Meters(400.0),
             coast_cleanup_proximity_m: Meters(80.0),
             drunkard_brush_radius_m: Meters(200.0),
             river_min_length_m: Meters(100.0),
@@ -538,6 +551,12 @@ impl Default for WorldGenConfig {
             shelf_width_m: Meters(80.0),
             shelf_depth_m: Meters(200.0),
 
+            // Subduction zone defaults (realistic values: 800m deep trench, 1500m arc)
+            trench_depth_m: Meters(800.0),
+            trench_width_m: Meters(80.0),
+            volcanic_arc_width_m: Meters(120.0),
+            volcanic_arc_elevation_m: Meters(1500.0),
+
             plate_lloyd_iterations: 2,
             continental_plate_speed_max: 0.4,
             oceanic_plate_speed_min: 0.4,
@@ -548,7 +567,6 @@ impl Default for WorldGenConfig {
             continentality_strength: 0.12,
             continentality_ocean_range_m: Meters(8000.0),
 
-            land_generation: LandGenerationMode::TectonicBase,
             tectonic_uplift_scale: 1.0,
             land_texture_strength_m: Meters(400.0),
             land_texture_coast_band_m: Meters(2000.0),
@@ -600,7 +618,7 @@ mod tests {
         assert_eq!(p.continental_blur_radius_cells, 10);
         assert_eq!(p.min_isthmus_width_cells, 6);
         assert_eq!(p.mountain_spread_radius_cells, 3);
-        assert_eq!(p.mountain_coast_buffer_cells, 6);
+        assert_eq!(p.mountain_coast_buffer_cells, 20);
         assert_eq!(p.coast_proximity_cells, 4);
         assert_eq!(p.min_lake_cells, 24);
         assert_eq!(p.river_min_length_cells, 5);

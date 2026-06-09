@@ -1,9 +1,9 @@
-use super::config::{LandGenerationMode, ResolvedSimParams, WorldGenConfig};
+use super::config::{ResolvedSimParams, WorldGenConfig};
 use super::world::WorldMap;
 
 /// Collapse the ambiguous elevation band around sea level before water classification.
 pub fn sharpen_elevation(map: &mut WorldMap, config: &WorldGenConfig, params: &ResolvedSimParams) {
-    let sharpening = config.effective_coast_sharpening();
+    let sharpening = config.coast_sharpening;
     if sharpening <= 0.001 {
         return;
     }
@@ -33,12 +33,10 @@ pub fn cleanup_coastal_specks(
 ) {
     let w = map.width;
     let h = map.height;
-    let passes = if config.land_generation == LandGenerationMode::TectonicBase
-        && !config.legacy_coast_cleanup
-    {
-        1
-    } else {
+    let passes = if config.legacy_coast_cleanup {
         config.coast_cleanup_passes
+    } else {
+        1
     };
 
     for _ in 0..passes {

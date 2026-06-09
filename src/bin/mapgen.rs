@@ -252,8 +252,6 @@ struct ConfigParams {
     continentality_ocean_range: Option<f64>,
 
     #[arg(long)]
-    land_generation: Option<String>,
-    #[arg(long)]
     tectonic_uplift_scale: Option<f32>,
     #[arg(long)]
     #[serde(alias = "land_texture_strength_m")]
@@ -484,11 +482,6 @@ impl ConfigParams {
         }
         if let Some(v) = self.continentality_ocean_range {
             config.continentality_ocean_range_m = Meters(v);
-        }
-        if let Some(ref v) = self.land_generation {
-            let json = format!("\"{v}\"");
-            config.land_generation = serde_json::from_str(&json)
-                .map_err(|e| format!("invalid land_generation '{v}': {e}"))?;
         }
         if let Some(v) = self.tectonic_uplift_scale {
             config.tectonic_uplift_scale = v;

@@ -2,7 +2,7 @@ use rayon::prelude::*;
 
 use super::coast;
 use super::grid_ops::chamfer_distance;
-use super::config::{LandGenerationMode, ResolvedSimParams, WorldGenConfig};
+use super::config::{ResolvedSimParams, WorldGenConfig};
 use super::world::{Biome, WorldMap};
 
 const MACRO_DEEP_OCEAN: f32 = 0.15;
@@ -80,11 +80,8 @@ fn apply_continental_shelf(
                 .max(params.abyssal_base_norm);
         }
 
-        // Nearshore land: gentle slope toward sea in tectonic mode
-        if config.land_generation == LandGenerationMode::TectonicBase
-            && macro_v >= 0.5
-            && elev >= sea
-        {
+        // Nearshore land: gentle slope toward sea
+        if macro_v >= 0.5 && elev >= sea {
             let coast_prox = dist_land[idx] as f32;
             if coast_prox < nearshore_band {
                 let t = (coast_prox / nearshore_band).clamp(0.0, 1.0);

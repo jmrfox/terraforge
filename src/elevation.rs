@@ -1,7 +1,7 @@
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
-use super::config::{LandGenerationMode, LandMaskMethod, ResolvedSimParams, WorldGenConfig};
+use super::config::{LandMaskMethod, ResolvedSimParams, WorldGenConfig};
 use super::grid_ops::{box_blur, chamfer_distance};
 use super::land_mask::{self, crust_macro_mask};
 use super::plates::{CrustType, Plate, PlateData};
@@ -110,6 +110,19 @@ fn distance_to_macro_land(macro_mask: &[f32], w: usize, h: usize) -> Vec<u32> {
     chamfer_distance(w, h, |idx| macro_mask[idx] >= MACRO_LAND_THRESHOLD)
 }
 
+/// Boundary influence data including subduction zone tracking.
+/// Oceanic→continental subduction creates trenches on oceanic side and volcanic arcs on continental side.
+pub struct BoundaryInfluence {
+    /// Base uplift from plate boundary interactions (normalized 0-1)
+    pub uplift: Vec<f32>,
+    /// Trench depth factor (0-1) for oceanic side of subduction zones
+    pub trench: Vec<f32>,
+    /// Volcanic arc boost factor (0-1) for continental side of subduction zones
+    pub arc_boost: Vec<f32>,
+    /// Distance to nearest plate boundary (in cells) for fade calculations
+    pub dist_to_boundary: Vec<u32>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BoundaryMotion {
     Convergent,
@@ -158,9 +171,10 @@ fn compute_boundary_influence(
     config: &WorldGenConfig,
     params: &ResolvedSimParams,
     macro_mask: &[f32],
-) -> Vec<f32> {
+) -> BoundaryInfluence {
     let w = map.width;
     let h = map.height;
+    let len = w * h;
     let plate_by_id: Vec<&Plate> = {
         let mut v = vec![None; plates.plates.len()];
         for p in &plates.plates {
@@ -170,84 +184,165 @@ fn compute_boundary_influence(
     };
 
     let plate_id = map.plate_id.as_slice();
-    let mut influence = vec![0.0f32; w * h];
     let strength = config.plate_boundary_strength;
 
-    influence
-        .par_chunks_mut(w)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, cell) in row.iter_mut().enumerate() {
-                let idx = y * w + x;
-                let my_plate = plate_id[idx] as usize;
-                let my = plate_by_id[my_plate];
-                let mut total = 0.0f32;
+    // Compute per-cell data in parallel
+    let cell_data: Vec<(f32, f32, f32, bool)> = (0..len)
+        .into_par_iter()
+        .map(|idx| {
+            let y = idx / w;
+            let x = idx % w;
+            let my_plate = plate_id[idx] as usize;
+            let my = plate_by_id[my_plate];
+            let mut total = 0.0f32;
+            let mut trench_intensity = 0.0f32;
+            let mut arc_intensity = 0.0f32;
+            let mut at_boundary = false;
 
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        continue;
-                    }
-                    let nidx = ny as usize * w + nx as usize;
-                    let neighbor_plate = plate_id[nidx] as usize;
-                    if neighbor_plate == my_plate {
-                        continue;
-                    }
-                    let neighbor = plate_by_id[neighbor_plate];
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let nidx = ny as usize * w + nx as usize;
+                let neighbor_plate = plate_id[nidx] as usize;
+                if neighbor_plate == my_plate {
+                    continue;
+                }
+                let neighbor = plate_by_id[neighbor_plate];
+                at_boundary = true;
 
-                    let bx = neighbor.center_x - my.center_x;
-                    let by = neighbor.center_y - my.center_y;
-                    let len_b = (bx * bx + by * by).sqrt().max(0.001);
-                    let ux = bx / len_b;
-                    let uy = by / len_b;
+                let bx = neighbor.center_x - my.center_x;
+                let by = neighbor.center_y - my.center_y;
+                let len_b = (bx * bx + by * by).sqrt().max(0.001);
+                let ux = bx / len_b;
+                let uy = by / len_b;
 
-                    let my_toward = my.velocity_x * ux + my.velocity_y * uy;
-                    let neighbor_toward =
-                        neighbor.velocity_x * (-ux) + neighbor.velocity_y * (-uy);
+                let my_toward = my.velocity_x * ux + my.velocity_y * uy;
+                let neighbor_toward =
+                    neighbor.velocity_x * (-ux) + neighbor.velocity_y * (-uy);
 
-                    let (motion, base) = if my_toward > 0.0 && neighbor_toward > 0.0 {
-                        (BoundaryMotion::Convergent, strength)
-                    } else if my_toward < 0.0 && neighbor_toward < 0.0 {
-                        (BoundaryMotion::Divergent, -strength * 0.6)
-                    } else {
-                        (BoundaryMotion::Transform, strength * 0.1)
-                    };
+                let (motion, base) = if my_toward > 0.0 && neighbor_toward > 0.0 {
+                    (BoundaryMotion::Convergent, strength)
+                } else if my_toward < 0.0 && neighbor_toward < 0.0 {
+                    (BoundaryMotion::Divergent, -strength * 0.6)
+                } else {
+                    (BoundaryMotion::Transform, strength * 0.1)
+                };
 
-                    let mut scale = crust_boundary_scale(
-                        my.crust_type,
-                        neighbor.crust_type,
-                        motion,
-                        config.oceanic_uplift_factor,
-                    );
-                    if matches!(motion, BoundaryMotion::Convergent) {
+                let mut scale = crust_boundary_scale(
+                    my.crust_type,
+                    neighbor.crust_type,
+                    motion,
+                    config.oceanic_uplift_factor,
+                );
+
+                // Detect subduction: oceanic→continental convergent
+                if matches!(motion, BoundaryMotion::Convergent) {
+                    let is_oc_subducting = my.crust_type == CrustType::Oceanic
+                        && neighbor.crust_type == CrustType::Continental;
+                    let is_cc_collision = my.crust_type == CrustType::Continental
+                        && neighbor.crust_type == CrustType::Continental;
+
+                    if is_oc_subducting {
+                        // This cell is oceanic, neighbor is continental
+                        // Mark for trench on oceanic side
+                        let intensity = (my_toward + neighbor_toward).abs().clamp(0.0, 1.0);
+                        trench_intensity = intensity;
+                        // Also mark arc boost for the continental neighbor (will apply later)
+                        arc_intensity = intensity;
+                    } else if is_cc_collision {
+                        // Continental-continental collision
                         let emergent_collision = macro_mask[idx] >= MACRO_LAND_THRESHOLD
                             && macro_mask[nidx] >= MACRO_LAND_THRESHOLD;
                         if !emergent_collision {
                             scale *= 0.0;
                         }
                     }
-                    total += base * scale;
                 }
 
-                *cell = total;
+                total += base * scale;
             }
-        });
 
+            (total, trench_intensity, arc_intensity, at_boundary)
+        })
+        .collect();
+
+    // Decompose into separate arrays
+    let mut influence = vec![0.0f32; len];
+    let mut trench = vec![0.0f32; len];
+    let mut arc_boost = vec![0.0f32; len];
+    let mut at_boundary_vec = vec![false; len];
+
+    for (idx, (inf, tr, arc, bound)) in cell_data.iter().enumerate() {
+        influence[idx] = *inf;
+        trench[idx] = *tr;
+        arc_boost[idx] = *arc;
+        at_boundary_vec[idx] = *bound;
+    }
+
+    // Second pass: transfer arc_boost from oceanic cells to continental neighbors
+    // This ensures the volcanic arc appears on the continental side of subduction zones
+    let plate_id = map.plate_id.as_slice();
+    let arc_boost_copy = arc_boost.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            if arc_boost_copy[idx] <= 0.001 {
+                continue;
+            }
+            // This cell has arc_boost (it's oceanic side of subduction)
+            // Find continental neighbors and transfer the boost to them
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let nidx = ny as usize * w + nx as usize;
+                let my_plate = plate_id[idx] as usize;
+                let neighbor_plate = plate_id[nidx] as usize;
+                if neighbor_plate == my_plate {
+                    continue;
+                }
+                let neighbor = plate_by_id[neighbor_plate];
+                if neighbor.crust_type == CrustType::Continental {
+                    // Transfer arc boost to continental neighbor
+                    arc_boost[nidx] = arc_boost[nidx].max(arc_boost_copy[idx]);
+                }
+            }
+        }
+    }
+
+    // Spread and blur the influence fields
     let spread = params.mountain_spread_radius_cells as usize;
-    let blurred = box_blur(&influence, w, h, spread);
+    let uplift_blurred = box_blur(&influence, w, h, spread);
     let weight = config.mountain_boundary_weight;
-    blurred
-        .into_iter()
-        .map(|v| v * weight)
-        .collect()
+    let uplift: Vec<f32> = uplift_blurred.into_iter().map(|v| v * weight).collect();
+
+    // Smooth trench and arc boost fields with their own widths
+    let trench_spread = params.trench_width_cells as usize;
+    let arc_spread = params.volcanic_arc_width_cells as usize;
+    let trench_smoothed = box_blur(&trench, w, h, trench_spread.max(1));
+    let arc_smoothed = box_blur(&arc_boost, w, h, arc_spread.max(1));
+
+    // Compute distance to boundary for fade calculations
+    let dist_to_boundary = chamfer_distance(w, h, |idx| at_boundary_vec[idx]);
+
+    BoundaryInfluence {
+        uplift,
+        trench: trench_smoothed,
+        arc_boost: arc_smoothed,
+        dist_to_boundary,
+    }
 }
 
 fn build_tectonic_base(
     raw: &mut [f32],
     macro_mask: &[f32],
     dist_to_macro_water: &[u32],
-    boundary: &[f32],
+    boundary_influence: &BoundaryInfluence,
     noise: &TerrainNoise,
     config: &WorldGenConfig,
     params: &ResolvedSimParams,
@@ -255,13 +350,16 @@ fn build_tectonic_base(
     h: usize,
 ) {
     let interior_buffer = params.orogeny_interior_min_dist_cells as f32;
-    let uplift_scale = config.tectonic_uplift_scale;
     let continental_base = params.continental_base_norm;
     let abyssal_base = params.abyssal_base_norm;
     let ocean_floor = params.ocean_floor_norm;
     let ceiling = params.max_elev_norm;
     let orogeny_only = config.mountain_noise_orogeny_only;
     let orogeny_threshold = config.orogeny_mountain_threshold;
+
+    let boundary = &boundary_influence.uplift;
+    let trench = &boundary_influence.trench;
+    let arc_boost = &boundary_influence.arc_boost;
 
     raw.par_chunks_mut(w)
         .enumerate()
@@ -298,8 +396,32 @@ fn build_tectonic_base(
 
                 let crust_base =
                     continental_base * macro_mask[idx] + abyssal_base * (1.0 - macro_mask[idx]);
-                let uplift = gated_boundary.max(0.0) * BOUNDARY_UPLIFT_SCALE * uplift_scale;
-                let v = crust_base + uplift + hill_delta;
+
+                // Apply trench depression on oceanic side of subduction zones
+                let trench_effect = trench[idx] * params.trench_depth_norm;
+                let oceanic_base = abyssal_base - trench_effect;
+
+                // Determine base elevation: use oceanic_base if trench effect is significant
+                let effective_base = if trench_effect > 0.001 {
+                    oceanic_base * (1.0 - macro_mask[idx]) + continental_base * macro_mask[idx]
+                } else {
+                    crust_base
+                };
+
+                // Base uplift from plate boundaries
+                let uplift = gated_boundary.max(0.0) * BOUNDARY_UPLIFT_SCALE;
+
+                // Apply volcanic arc elevation boost on continental side
+                let arc_elevation = if arc_boost[idx] > 0.001 && macro_land {
+                    // Blend toward target arc elevation based on boost factor
+                    let arc_target = params.sea_level_norm + params.volcanic_arc_elevation_norm;
+                    let blend = arc_boost[idx].clamp(0.0, 1.0);
+                    uplift * (1.0 - blend) + (arc_target - effective_base) * blend
+                } else {
+                    uplift
+                };
+
+                let v = effective_base + arc_elevation + hill_delta;
                 *cell = v.clamp(ocean_floor, ceiling);
             }
         });
@@ -348,78 +470,6 @@ fn apply_land_texture(
     }
 }
 
-fn generate_legacy_elevation(
-    raw: &mut [f32],
-    land_mask: &[f32],
-    macro_mask: &[f32],
-    dist_to_macro_water: &[u32],
-    boundary: &[f32],
-    noise: &TerrainNoise,
-    config: &WorldGenConfig,
-    params: &ResolvedSimParams,
-    w: usize,
-    h: usize,
-    mask_low: f32,
-    mask_high: f32,
-) {
-    let interior_buffer = params.orogeny_interior_min_dist_cells as f32;
-    let orogeny_threshold = config.orogeny_mountain_threshold;
-    let orogeny_only = config.mountain_noise_orogeny_only;
-    let continental_base = params.continental_base_norm;
-    let abyssal_base = params.abyssal_base_norm;
-    let ocean_floor = params.ocean_floor_norm;
-
-    raw.par_chunks_mut(w)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, cell) in row.iter_mut().enumerate() {
-                let idx = y * w + x;
-                let mask = smoothstep(mask_low, mask_high, land_mask[idx]);
-                let macro_land = macro_mask[idx] >= MACRO_WATER_THRESHOLD;
-                let interior_w = smoothstep(
-                    0.0,
-                    interior_buffer,
-                    dist_to_macro_water[idx] as f32,
-                );
-                let gated_boundary = if macro_land {
-                    boundary[idx] * interior_w
-                } else {
-                    0.0
-                };
-
-                let norm_orogeny = (gated_boundary / BOUNDARY_UPLIFT_SCALE).clamp(0.0, 1.0);
-                let detail = noise.sample_detail(
-                    w as f32,
-                    h as f32,
-                    x,
-                    y,
-                    norm_orogeny,
-                    orogeny_only,
-                    orogeny_threshold,
-                    false,
-                );
-
-                let crust_base =
-                    continental_base * macro_mask[idx] + abyssal_base * (1.0 - macro_mask[idx]);
-                let land_body = normalize01(detail + gated_boundary * BOUNDARY_UPLIFT_SCALE)
-                    * 0.94
-                    + continental_base * 0.12;
-                let v = land_body * mask + crust_base * (1.0 - mask);
-                *cell = v.max(ocean_floor);
-            }
-        });
-
-    normalize_land_elevation_per_mass(
-        raw,
-        land_mask,
-        w,
-        h,
-        mask_low,
-        mask_high,
-        ocean_floor,
-    );
-}
-
 pub fn generate_elevation(
     map: &mut WorldMap,
     plates: &PlateData,
@@ -442,60 +492,41 @@ pub fn generate_elevation(
 
     report_stage(progress, stage_start, stage_end, 0.0, "Building tectonic base");
 
-    match config.land_generation {
-        LandGenerationMode::TectonicBase => {
-            build_tectonic_base(
-                &mut raw,
-                &macro_mask,
-                &dist_to_macro_water,
-                &boundary,
-                &noise,
-                config,
-                params,
-                w,
-                h,
-            );
+    build_tectonic_base(
+        &mut raw,
+        &macro_mask,
+        &dist_to_macro_water,
+        &boundary,
+        &noise,
+        config,
+        params,
+        w,
+        h,
+    );
 
-            report_stage(progress, stage_start, stage_end, 0.45, "Applying land texture");
-            let texture = land_mask::generate_texture(config, params, Some(map), Some(plates));
-            apply_land_texture(
-                &mut raw,
-                &texture,
-                &macro_mask,
-                &dist_to_macro_water,
-                &dist_to_macro_land,
-                config,
-                params,
-            );
-            scale_tectonic_land_range(&mut raw, &macro_mask, params);
-        }
-        LandGenerationMode::LegacyMask => {
-            let land_mask = land_mask::generate(config, params, Some(map), Some(plates));
-            let drunkard_mask = config.land_mask_method == LandMaskMethod::DrunkardsWalk;
-            let (mask_low, mask_high) = if drunkard_mask {
-                (0.08, 0.24)
-            } else {
-                (0.30, 0.50)
-            };
-            generate_legacy_elevation(
-                &mut raw,
-                &land_mask,
-                &macro_mask,
-                &dist_to_macro_water,
-                &boundary,
-                &noise,
-                config,
-                params,
-                w,
-                h,
-                mask_low,
-                mask_high,
-            );
-        }
-    }
+    report_stage(progress, stage_start, stage_end, 0.45, "Applying land texture");
+    let texture = land_mask::generate_texture(config, params, Some(map), Some(plates));
+    apply_land_texture(
+        &mut raw,
+        &texture,
+        &macro_mask,
+        &dist_to_macro_water,
+        &dist_to_macro_land,
+        config,
+        params,
+    );
+    scale_tectonic_land_range(&mut raw, &macro_mask, params);
 
     map.elevation.clone_from(&raw);
-    map.orogeny = normalize_orogeny(&boundary);
+    // Combine boundary uplift with arc boost for orogeny field
+    // This ensures mountains at subduction zones are properly classified
+    let combined_orogeny: Vec<f32> = boundary
+        .uplift
+        .iter()
+        .zip(boundary.arc_boost.iter())
+        .map(|(&uplift, &arc)| (uplift + arc * BOUNDARY_UPLIFT_SCALE).max(0.0))
+        .collect();
+    map.orogeny = normalize_orogeny(&combined_orogeny);
 }
 
 /// Stretch continental land heights into a usable range above sea level (global, not per-mass).
@@ -525,67 +556,3 @@ fn scale_tectonic_land_range(raw: &mut [f32], macro_mask: &[f32], params: &Resol
     }
 }
 
-/// Normalize each connected landmass independently (legacy mask mode only).
-fn normalize_land_elevation_per_mass(
-    raw: &mut [f32],
-    land_mask: &[f32],
-    w: usize,
-    h: usize,
-    mask_low: f32,
-    mask_high: f32,
-    floor: f32,
-) {
-    let len = w * h;
-    let mut visited = vec![false; len];
-    let ceiling = 1.0f32;
-
-    for start in 0..len {
-        if visited[start] || smoothstep(mask_low, mask_high, land_mask[start]) < 0.15 {
-            continue;
-        }
-
-        let mut stack = vec![start];
-        let mut component = Vec::new();
-        visited[start] = true;
-
-        while let Some(idx) = stack.pop() {
-            component.push(idx);
-            let x = idx % w;
-            let y = idx / w;
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                    continue;
-                }
-                let nidx = ny as usize * w + nx as usize;
-                if visited[nidx] || smoothstep(mask_low, mask_high, land_mask[nidx]) < 0.15 {
-                    continue;
-                }
-                visited[nidx] = true;
-                stack.push(nidx);
-            }
-        }
-
-        let mut land_min = f32::MAX;
-        let mut land_max = f32::MIN;
-        for &idx in &component {
-            land_min = land_min.min(raw[idx]);
-            land_max = land_max.max(raw[idx]);
-        }
-        let span = (land_max - land_min).max(0.0001);
-
-        for idx in component {
-            let t = ((raw[idx] - land_min) / span).clamp(0.0, 1.0);
-            let stretched = t.powf(0.42);
-            let elev = floor + stretched * (ceiling - floor);
-            raw[idx] = (elev * LAND_COMPRESSION + LAND_UPLIFT).clamp(floor, ceiling);
-        }
-    }
-
-    for idx in 0..len {
-        if smoothstep(mask_low, mask_high, land_mask[idx]) < 0.15 {
-            raw[idx] = floor;
-        }
-    }
-}

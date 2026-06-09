@@ -77,7 +77,6 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
     });
 
     egui::CollapsingHeader::new("Land generation").show(ui, |ui| {
-        land_generation_mode_field(ui, &mut config.land_generation, defaults.land_generation);
         f32_field(
             ui,
             "Tectonic uplift scale",
@@ -811,34 +810,6 @@ fn usize_field(
         }
     });
     ui.add_space(4.0);
-}
-
-fn land_generation_mode_field(
-    ui: &mut Ui,
-    mode: &mut LandGenerationMode,
-    default: LandGenerationMode,
-) {
-    ui.label("Land generation mode");
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("land_generation_mode")
-            .selected_text(land_generation_label(*mode))
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(mode, LandGenerationMode::TectonicBase, "TectonicBase");
-                ui.selectable_value(mode, LandGenerationMode::LegacyMask, "LegacyMask");
-            });
-        if reset_button(ui) {
-            *mode = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn land_generation_label(mode: LandGenerationMode) -> &'static str {
-    match mode {
-        LandGenerationMode::TectonicBase => "TectonicBase",
-        LandGenerationMode::LegacyMask => "LegacyMask",
-    }
 }
 
 fn bool_field(ui: &mut Ui, label: &str, value: &mut bool, default: bool) {
