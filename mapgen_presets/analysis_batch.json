@@ -1,0 +1,20 @@
+{
+  "base": {
+    "width": 512,
+    "height": 512,
+    "target_land_fraction": 0.35
+  },
+  "variants": [
+    { "name": "seed_42", "seed": 42 },
+    { "name": "seed_7", "seed": 7 },
+    { "name": "seed_99", "seed": 99 },
+    { "name": "seed_1234", "seed": 1234 },
+    { "name": "seed_5555", "seed": 5555 },
+    { "name": "high_land_50", "seed": 42, "target_land_fraction": 0.50 },
+    { "name": "low_land_20", "seed": 42, "target_land_fraction": 0.20 },
+    { "name": "no_edge_bias", "seed": 42, "edge_ocean_bias": 0.0 },
+    { "name": "strong_edge_bias", "seed": 42, "edge_ocean_bias": 0.25 },
+    { "name": "short_continents", "seed": 42, "continent_wavelength_m": 2560.0 },
+    { "name": "long_continents", "seed": 42, "continent_wavelength_m": 10240.0 }
+  ]
+}

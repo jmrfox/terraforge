@@ -2,7 +2,7 @@ use egui::Ui;
 use terraforge::PriorSet;
 
 pub fn draw_sampling(ui: &mut Ui, prior_set: &mut PriorSet) {
-    ui.label("Sample numerical parameters from priors. Grid size, cell size, seed, enums, and boolean toggles are not sampled.");
+    ui.label("Sample numerical parameters from Earth-like priors centered on tuned defaults. Grid size, cell size, seed, enums, and boolean toggles are not sampled.");
     ui.horizontal(|ui| {
         if ui.button("Enable all").clicked() {
             prior_set.enable_all();
@@ -12,7 +12,9 @@ pub fn draw_sampling(ui: &mut Ui, prior_set: &mut PriorSet) {
         }
         if ui
             .button("Reset selection")
-            .on_hover_text("Restore default checkboxes for which parameters are included in sampling")
+            .on_hover_text(
+                "Restore default checkboxes for which parameters are included in sampling",
+            )
             .clicked()
         {
             prior_set.reset_sampling_selection();
@@ -34,11 +36,7 @@ pub fn draw_sampling(ui: &mut Ui, prior_set: &mut PriorSet) {
         }
         ui.horizontal(|ui| {
             ui.checkbox(&mut param.enabled, param.label);
-            ui.label(
-                egui::RichText::new(param.dist.summary())
-                    .small()
-                    .weak(),
-            );
+            ui.label(egui::RichText::new(param.dist.summary()).small().weak());
         });
     }
 }

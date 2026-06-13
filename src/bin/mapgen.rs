@@ -1,9 +1,11 @@
-//! Headless map generation CLI — no Bevy window required.
+//! Headless map generation CLI (no GUI).
 //!
 //! ```bash
 //! cargo run --bin mapgen -- -o out/map.png --width 512 --seed 42
+//! cargo run --bin mapgen -- -o out/map.png --sample --sample-seed 99 --seed 42
 //! cargo run --bin mapgen -- -o out/map.tiff --format tiff --width 512 --seed 42
 //! cargo run --bin mapgen -- --batch presets.json --out-dir out/ --stats
+//! cargo run --bin mapgen -- --batch mapgen_presets/sample_batch.json --out-dir out/
 //! ```
 
 use std::fs;
@@ -12,11 +14,13 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
+use rand::Rng;
 use serde::Deserialize;
 
 use terraforge::{
-    Celsius, Degrees, MapExportFormat, Meters, SquareKilometers, SquareMeters, TiffLayerSet,
-    WorldGenConfig, compute_map_stats, generate_world, write_map_stats, write_map_with_tiff_layers,
+    compute_map_stats, generate_world, sample_parameters, write_map_stats,
+    write_map_with_tiff_layers, Degrees, MapExportFormat, Meters, PriorSet, SquareMeters,
+    TiffLayerSet, WorldGenConfig,
 };
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -38,7 +42,10 @@ impl FormatArg {
 }
 
 #[derive(Parser)]
-#[command(name = "mapgen", about = "Generate procedural map previews (PNG or multi-page TIFF)")]
+#[command(
+    name = "mapgen",
+    about = "Generate procedural map previews (PNG or multi-page TIFF)"
+)]
 struct Cli {
     /// Output path (single-run mode). Extension `.tiff`/`.tif` selects TIFF unless `--format` overrides.
     #[arg(short, long, conflicts_with = "batch")]
@@ -49,7 +56,7 @@ struct Cli {
     format: FormatArg,
 
     /// TIFF page selection (`full`, `default`, or comma-separated layer names).
-    /// Layers: biomes, elevation, temperature, rainfall, biome_id, plate_id, water, river, mountain, orogeny.
+    /// Layers: biomes, elevation, temperature, rainfall, biome_id, water.
     #[arg(long, default_value = "full")]
     tiff_layers: String,
 
@@ -83,13 +90,6 @@ struct ConfigParams {
     height: Option<usize>,
     #[arg(long)]
     seed: Option<u64>,
-    #[arg(long)]
-    #[serde(alias = "plate_density_per_km2")]
-    plate_density: Option<f64>,
-    /// Legacy: absolute plate count (converted to density from current map extent).
-    #[arg(long)]
-    #[serde(alias = "plate_count")]
-    plates: Option<u32>,
 
     #[arg(long)]
     #[serde(alias = "cell_size_m")]
@@ -105,36 +105,66 @@ struct ConfigParams {
     ocean_floor: Option<f64>,
 
     #[arg(long)]
-    #[serde(alias = "continental_margin_m")]
-    continental_margin: Option<f64>,
+    #[serde(alias = "elevation_wavelength_m")]
+    elevation_wavelength: Option<f64>,
     #[arg(long)]
-    #[serde(alias = "min_isthmus_width_m")]
-    min_isthmus_width: Option<f64>,
+    #[serde(alias = "continent_wavelength_m")]
+    continent_wavelength: Option<f64>,
     #[arg(long)]
-    #[serde(alias = "mountain_belt_width_m")]
-    mountain_belt_width: Option<f64>,
+    #[serde(alias = "detail_wavelength_m")]
+    detail_wavelength: Option<f64>,
     #[arg(long)]
-    #[serde(alias = "mountain_coast_buffer_m")]
-    mountain_coast_buffer: Option<f64>,
+    elevation_octaves: Option<u32>,
     #[arg(long)]
-    #[serde(alias = "coast_cleanup_proximity_m")]
-    coast_cleanup_proximity: Option<f64>,
+    elevation_persistence: Option<f64>,
     #[arg(long)]
-    #[serde(alias = "drunkard_brush_radius_m")]
-    drunkard_brush_radius: Option<f64>,
+    elevation_continent_weight: Option<f32>,
     #[arg(long)]
-    #[serde(alias = "river_min_length_m")]
-    river_min_length: Option<f64>,
+    elevation_detail_weight: Option<f32>,
+    #[arg(long)]
+    elevation_ridge_weight: Option<f32>,
+    #[arg(long)]
+    elevation_ridge_envelope_enabled: Option<bool>,
+    #[arg(long)]
+    elevation_ridge_envelope_wavelength_m: Option<f64>,
+    #[arg(long)]
+    elevation_ridge_envelope_strength: Option<f32>,
+    #[arg(long)]
+    elevation_detail_envelope_enabled: Option<bool>,
+    #[arg(long)]
+    elevation_detail_envelope_wavelength_m: Option<f64>,
+    #[arg(long)]
+    elevation_detail_envelope_strength: Option<f32>,
+    #[arg(long)]
+    target_land_fraction: Option<f32>,
+    #[arg(long)]
+    edge_ocean_bias: Option<f32>,
 
     #[arg(long)]
     #[serde(alias = "min_lake_area_m2")]
     min_lake_area: Option<f64>,
+
     #[arg(long)]
-    #[serde(alias = "river_min_drainage_area_km2")]
-    river_drainage_area: Option<f64>,
+    #[serde(alias = "temperature_range_c")]
+    temperature_range: Option<f64>,
     #[arg(long)]
-    #[serde(alias = "river_tributary_drainage_area_km2")]
-    river_tributary_drainage: Option<f64>,
+    #[serde(alias = "lapse_rate_c_per_km")]
+    lapse_rate: Option<f64>,
+    #[arg(long)]
+    #[serde(alias = "rainfall_scale")]
+    rainfall: Option<f32>,
+    #[arg(long)]
+    #[serde(alias = "temperature_wavelength_m")]
+    temperature_wavelength: Option<f64>,
+    #[arg(long)]
+    continentality_strength: Option<f32>,
+    #[arg(long)]
+    #[serde(alias = "continentality_ocean_range_m")]
+    continentality_ocean_range: Option<f64>,
+    #[arg(long)]
+    orographic_elevation_weight: Option<f32>,
+    #[arg(long)]
+    interior_drying_factor: Option<f32>,
 
     #[arg(long)]
     #[serde(alias = "mountain_min_elevation_m")]
@@ -142,150 +172,17 @@ struct ConfigParams {
     #[arg(long)]
     #[serde(alias = "mountain_min_slope_deg")]
     mountain_min_slope: Option<f64>,
+    #[arg(long)]
+    mountain_min_ridge_influence: Option<f32>,
 
+    /// Sample numerical parameters from default priors before generation (same as GUI "Sample & generate").
     #[arg(long)]
-    #[serde(alias = "equator_mean_temp_c")]
-    equator_temp: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "pole_mean_temp_c")]
-    pole_temp: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "lapse_rate_c_per_km")]
-    lapse_rate: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "rainfall_scale")]
-    rainfall: Option<f32>,
+    #[serde(default)]
+    sample: bool,
 
+    /// RNG seed for prior sampling (reproducible parameter draws). Omit for a random draw.
     #[arg(long)]
-    #[serde(alias = "continent_wavelength_m")]
-    continent_wavelength: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "hill_wavelength_m")]
-    hill_wavelength: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "mountain_detail_wavelength_m")]
-    mountain_detail_wavelength: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "land_mask_wavelength_m")]
-    land_mask_wavelength: Option<f64>,
-
-    #[arg(long)]
-    #[serde(alias = "orogeny_mountain_threshold")]
-    orogeny_threshold: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "mountain_cluster_threshold")]
-    mountain_cluster: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "plate_boundary_strength")]
-    plate_boundary: Option<f32>,
-    #[arg(long)]
-    land_mask_method: Option<String>,
-    #[arg(long)]
-    coast_sharpening: Option<f32>,
-    #[arg(long)]
-    river_meander_strength: Option<f32>,
-    #[arg(long)]
-    hybrid_noise_blend: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "ca_coarse_cell_size_m")]
-    ca_coarse_cell_size: Option<f64>,
-    /// Legacy: CA coarse factor relative to cell size.
-    #[arg(long)]
-    #[serde(alias = "ca_coarse_factor")]
-    ca_coarse: Option<u32>,
-    #[arg(long)]
-    #[serde(alias = "drunkard_walker_density_per_km2")]
-    drunkard_walker_density: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "land_mask_blur_m")]
-    land_mask_blur: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "min_landmass_area_km2")]
-    min_landmass_area: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "orogeny_peak_radius_m")]
-    orogeny_peak_radius: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "land_mask_close_radius_m")]
-    land_mask_close_radius: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "max_landmass_density_per_km2")]
-    max_landmass_density: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "drunkard_path_length_m")]
-    drunkard_path_length: Option<f64>,
-
-    #[arg(long)]
-    #[serde(alias = "orogeny_interior_min_dist_m")]
-    orogeny_interior_min_dist: Option<f64>,
-    #[arg(long)]
-    mountain_noise_orogeny_only: Option<bool>,
-
-    #[arg(long)]
-    target_land_fraction: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "shelf_width_m")]
-    shelf_width: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "shelf_depth_m")]
-    shelf_depth: Option<f64>,
-
-    #[arg(long)]
-    #[serde(alias = "plate_lloyd_iterations")]
-    plate_lloyd_iterations: Option<u32>,
-    #[arg(long)]
-    continental_plate_speed_max: Option<f32>,
-    #[arg(long)]
-    oceanic_plate_speed_min: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "mantle_flow_angle_deg")]
-    mantle_flow_angle: Option<f64>,
-
-    #[arg(long)]
-    orographic_orogeny_weight: Option<f32>,
-    #[arg(long)]
-    interior_drying_factor: Option<f32>,
-    #[arg(long)]
-    continentality_strength: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "continentality_ocean_range_m")]
-    continentality_ocean_range: Option<f64>,
-
-    #[arg(long)]
-    tectonic_uplift_scale: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "land_texture_strength_m")]
-    land_texture_strength: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "land_texture_coast_band_m")]
-    land_texture_coast_band: Option<f64>,
-    #[arg(long)]
-    #[serde(alias = "island_zone_m")]
-    island_zone: Option<f64>,
-    #[arg(long)]
-    landscape_evolution_enabled: Option<bool>,
-    #[arg(long)]
-    landscape_evolution_iterations: Option<u32>,
-    #[arg(long)]
-    coarse_hydro_factor: Option<u32>,
-    #[arg(long)]
-    landscape_evolution_full_res_passes: Option<u32>,
-    #[arg(long)]
-    landscape_erosion_factor: Option<f32>,
-    #[arg(long)]
-    landscape_uplift_factor: Option<f32>,
-    #[arg(long)]
-    erodibility_plains: Option<f32>,
-    #[arg(long)]
-    erodibility_mountains: Option<f32>,
-    #[arg(long)]
-    river_incision_enabled: Option<bool>,
-    #[arg(long)]
-    river_incision_factor: Option<f32>,
-    #[arg(long)]
-    rainfall_erodibility_coupling: Option<f32>,
-    #[arg(long)]
-    legacy_coast_cleanup: Option<bool>,
+    sample_seed: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -316,13 +213,6 @@ impl ConfigParams {
         if let Some(v) = self.cell_size {
             config.cell_size_m = Meters(v);
         }
-        if let Some(v) = self.plate_density {
-            config.legacy_plate_count = None;
-            config.plate_density_per_km2 = v;
-        } else if let Some(v) = self.plates {
-            config.legacy_plate_count = None;
-            config.plate_density_per_km2 = v as f64 / config.map_area_km2().max(1e-9);
-        }
         if let Some(v) = self.max_elevation {
             config.max_elevation_m = Meters(v);
         }
@@ -332,47 +222,60 @@ impl ConfigParams {
         if let Some(v) = self.ocean_floor {
             config.ocean_floor_m = Meters(v);
         }
-        if let Some(v) = self.continental_margin {
-            config.continental_margin_m = Meters(v);
+        if let Some(v) = self.elevation_wavelength {
+            config.elevation_wavelength_m = Meters(v);
+            config.continent_wavelength_m = Meters(v);
         }
-        if let Some(v) = self.min_isthmus_width {
-            config.min_isthmus_width_m = Meters(v);
+        if let Some(v) = self.continent_wavelength {
+            config.continent_wavelength_m = Meters(v);
         }
-        if let Some(v) = self.mountain_belt_width {
-            config.mountain_belt_width_m = Meters(v);
+        if let Some(v) = self.detail_wavelength {
+            config.detail_wavelength_m = Meters(v);
         }
-        if let Some(v) = self.mountain_coast_buffer {
-            config.mountain_coast_buffer_m = Meters(v);
+        if let Some(v) = self.elevation_octaves {
+            config.elevation_octaves = v.max(1);
         }
-        if let Some(v) = self.coast_cleanup_proximity {
-            config.coast_cleanup_proximity_m = Meters(v);
+        if let Some(v) = self.elevation_persistence {
+            config.elevation_persistence = v.clamp(0.1, 0.95);
         }
-        if let Some(v) = self.drunkard_brush_radius {
-            config.drunkard_brush_radius_m = Meters(v);
+        if let Some(v) = self.elevation_continent_weight {
+            config.elevation_continent_weight = v;
         }
-        if let Some(v) = self.river_min_length {
-            config.river_min_length_m = Meters(v);
+        if let Some(v) = self.elevation_detail_weight {
+            config.elevation_detail_weight = v;
+        }
+        if let Some(v) = self.elevation_ridge_weight {
+            config.elevation_ridge_weight = v;
+        }
+        if let Some(v) = self.elevation_ridge_envelope_enabled {
+            config.elevation_ridge_envelope.enabled = v;
+        }
+        if let Some(v) = self.elevation_ridge_envelope_wavelength_m {
+            config.elevation_ridge_envelope.wavelength_m = Meters(v);
+        }
+        if let Some(v) = self.elevation_ridge_envelope_strength {
+            config.elevation_ridge_envelope.strength = v;
+        }
+        if let Some(v) = self.elevation_detail_envelope_enabled {
+            config.elevation_detail_envelope.enabled = v;
+        }
+        if let Some(v) = self.elevation_detail_envelope_wavelength_m {
+            config.elevation_detail_envelope.wavelength_m = Meters(v);
+        }
+        if let Some(v) = self.elevation_detail_envelope_strength {
+            config.elevation_detail_envelope.strength = v;
+        }
+        if let Some(v) = self.target_land_fraction {
+            config.target_land_fraction = Some(v.clamp(0.01, 0.99));
+        }
+        if let Some(v) = self.edge_ocean_bias {
+            config.edge_ocean_bias = v.clamp(0.0, 0.5);
         }
         if let Some(v) = self.min_lake_area {
             config.min_lake_area_m2 = SquareMeters(v);
         }
-        if let Some(v) = self.river_drainage_area {
-            config.river_min_drainage_area_km2 = SquareKilometers(v);
-        }
-        if let Some(v) = self.river_tributary_drainage {
-            config.river_tributary_drainage_area_km2 = SquareKilometers(v);
-        }
-        if let Some(v) = self.mountain_min_elevation {
-            config.mountain_min_elevation_m = Meters(v);
-        }
-        if let Some(v) = self.mountain_min_slope {
-            config.mountain_min_slope_deg = Degrees(v);
-        }
-        if let Some(v) = self.equator_temp {
-            config.equator_mean_temp_c = Celsius(v);
-        }
-        if let Some(v) = self.pole_temp {
-            config.pole_mean_temp_c = Celsius(v);
+        if let Some(v) = self.temperature_range {
+            config.temperature_range_c = v.max(1.0);
         }
         if let Some(v) = self.lapse_rate {
             config.lapse_rate_c_per_km = v;
@@ -380,102 +283,8 @@ impl ConfigParams {
         if let Some(v) = self.rainfall {
             config.rainfall_scale = v;
         }
-        if let Some(v) = self.continent_wavelength {
-            config.continent_wavelength_m = Meters(v);
-        }
-        if let Some(v) = self.hill_wavelength {
-            config.hill_wavelength_m = Meters(v);
-        }
-        if let Some(v) = self.mountain_detail_wavelength {
-            config.mountain_detail_wavelength_m = Meters(v);
-        }
-        if let Some(v) = self.land_mask_wavelength {
-            config.land_mask_wavelength_m = Meters(v);
-        }
-        if let Some(v) = self.orogeny_threshold {
-            config.orogeny_mountain_threshold = v;
-        }
-        if let Some(v) = self.mountain_cluster {
-            config.mountain_cluster_threshold = v;
-        }
-        if let Some(v) = self.plate_boundary {
-            config.plate_boundary_strength = v;
-        }
-        if let Some(ref v) = self.land_mask_method {
-            let json = format!("\"{v}\"");
-            config.land_mask_method = serde_json::from_str(&json)
-                .map_err(|e| format!("invalid land_mask_method '{v}': {e}"))?;
-        }
-        if let Some(v) = self.coast_sharpening {
-            config.coast_sharpening = v;
-        }
-        if let Some(v) = self.river_meander_strength {
-            config.river_meander_strength = v;
-        }
-        if let Some(v) = self.hybrid_noise_blend {
-            config.hybrid_noise_blend = v;
-        }
-        if let Some(v) = self.ca_coarse_cell_size {
-            config.legacy_ca_coarse_factor = None;
-            config.ca_coarse_cell_size_m = Meters(v);
-        } else if let Some(v) = self.ca_coarse {
-            config.legacy_ca_coarse_factor = None;
-            config.ca_coarse_cell_size_m = Meters(config.cell_size_m.0 * v as f64);
-        }
-        if let Some(v) = self.drunkard_walker_density {
-            config.legacy_drunkard_walkers = None;
-            config.drunkard_walker_density_per_km2 = v;
-        }
-        if let Some(v) = self.land_mask_blur {
-            config.land_mask_blur_m = Meters(v);
-        }
-        if let Some(v) = self.min_landmass_area {
-            config.min_landmass_area_km2 = SquareKilometers(v);
-        }
-        if let Some(v) = self.orogeny_peak_radius {
-            config.orogeny_peak_radius_m = Meters(v);
-        }
-        if let Some(v) = self.land_mask_close_radius {
-            config.land_mask_close_radius_m = Meters(v);
-        }
-        if let Some(v) = self.max_landmass_density {
-            config.max_landmass_density_per_km2 = v;
-        }
-        if let Some(v) = self.drunkard_path_length {
-            config.drunkard_path_length_m = Meters(v);
-        }
-        if let Some(v) = self.orogeny_interior_min_dist {
-            config.orogeny_interior_min_dist_m = Meters(v);
-        }
-        if let Some(v) = self.mountain_noise_orogeny_only {
-            config.mountain_noise_orogeny_only = v;
-        }
-        if let Some(v) = self.target_land_fraction {
-            config.target_land_fraction = Some(v);
-        }
-        if let Some(v) = self.shelf_width {
-            config.shelf_width_m = Meters(v);
-        }
-        if let Some(v) = self.shelf_depth {
-            config.shelf_depth_m = Meters(v);
-        }
-        if let Some(v) = self.plate_lloyd_iterations {
-            config.plate_lloyd_iterations = v;
-        }
-        if let Some(v) = self.continental_plate_speed_max {
-            config.continental_plate_speed_max = v;
-        }
-        if let Some(v) = self.oceanic_plate_speed_min {
-            config.oceanic_plate_speed_min = v;
-        }
-        if let Some(v) = self.mantle_flow_angle {
-            config.mantle_flow_angle_deg = v;
-        }
-        if let Some(v) = self.orographic_orogeny_weight {
-            config.orographic_orogeny_weight = v;
-        }
-        if let Some(v) = self.interior_drying_factor {
-            config.interior_drying_factor = v;
+        if let Some(v) = self.temperature_wavelength {
+            config.temperature_wavelength_m = Meters(v);
         }
         if let Some(v) = self.continentality_strength {
             config.continentality_strength = v;
@@ -483,53 +292,20 @@ impl ConfigParams {
         if let Some(v) = self.continentality_ocean_range {
             config.continentality_ocean_range_m = Meters(v);
         }
-        if let Some(v) = self.tectonic_uplift_scale {
-            config.tectonic_uplift_scale = v;
+        if let Some(v) = self.orographic_elevation_weight {
+            config.orographic_elevation_weight = v;
         }
-        if let Some(v) = self.land_texture_strength {
-            config.land_texture_strength_m = Meters(v);
+        if let Some(v) = self.interior_drying_factor {
+            config.interior_drying_factor = v;
         }
-        if let Some(v) = self.land_texture_coast_band {
-            config.land_texture_coast_band_m = Meters(v);
+        if let Some(v) = self.mountain_min_elevation {
+            config.mountain_min_elevation_m = Meters(v);
         }
-        if let Some(v) = self.island_zone {
-            config.island_zone_m = Meters(v);
+        if let Some(v) = self.mountain_min_slope {
+            config.mountain_min_slope_deg = Degrees(v);
         }
-        if let Some(v) = self.landscape_evolution_enabled {
-            config.landscape_evolution_enabled = v;
-        }
-        if let Some(v) = self.landscape_evolution_iterations {
-            config.landscape_evolution_iterations = v;
-        }
-        if let Some(v) = self.coarse_hydro_factor {
-            config.coarse_hydro_factor = v.max(1);
-        }
-        if let Some(v) = self.landscape_evolution_full_res_passes {
-            config.landscape_evolution_full_res_passes = v;
-        }
-        if let Some(v) = self.landscape_erosion_factor {
-            config.landscape_erosion_factor = v;
-        }
-        if let Some(v) = self.landscape_uplift_factor {
-            config.landscape_uplift_factor = v;
-        }
-        if let Some(v) = self.erodibility_plains {
-            config.erodibility_plains = v;
-        }
-        if let Some(v) = self.erodibility_mountains {
-            config.erodibility_mountains = v;
-        }
-        if let Some(v) = self.river_incision_enabled {
-            config.river_incision_enabled = v;
-        }
-        if let Some(v) = self.river_incision_factor {
-            config.river_incision_factor = v;
-        }
-        if let Some(v) = self.rainfall_erodibility_coupling {
-            config.rainfall_erodibility_coupling = v;
-        }
-        if let Some(v) = self.legacy_coast_cleanup {
-            config.legacy_coast_cleanup = v;
+        if let Some(v) = self.mountain_min_ridge_influence {
+            config.mountain_min_ridge_influence = v.clamp(0.0, 1.0);
         }
         Ok(())
     }
@@ -546,7 +322,22 @@ fn build_config(cli: &Cli) -> Result<WorldGenConfig, String> {
     } else {
         WorldGenConfig::default()
     };
+    let sample = cli.params.sample;
+    let sample_seed = cli.params.sample_seed;
+    let had_seed = cli.params.seed.is_some();
     cli.params.apply_to(&mut config)?;
+    if sample {
+        let priors = PriorSet::default_priors();
+        let used = sample_parameters(&mut config, &priors, sample_seed);
+        eprintln!(
+            "sampled {} parameters (sample-seed {used})",
+            priors.enabled_count()
+        );
+        if !had_seed {
+            config.seed = rand::thread_rng().gen();
+            eprintln!("map seed {}", config.seed);
+        }
+    }
     Ok(config)
 }
 
@@ -570,7 +361,7 @@ fn stats_path_from_flag(output: &Path, stats_arg: &Option<Option<String>>) -> Op
     }
 }
 
-fn run_single(
+fn generate_write_and_stats(
     config: &WorldGenConfig,
     output: &Path,
     format: MapExportFormat,
@@ -591,6 +382,16 @@ fn run_single(
     Ok(())
 }
 
+fn run_single(
+    config: &WorldGenConfig,
+    output: &Path,
+    format: MapExportFormat,
+    tiff_layers: &TiffLayerSet,
+    stats_path: Option<&Path>,
+) -> Result<(), String> {
+    generate_write_and_stats(config, output, format, tiff_layers, stats_path)
+}
+
 fn run_batch(
     manifest_path: &Path,
     out_dir: &Path,
@@ -598,10 +399,10 @@ fn run_batch(
     tiff_layers: &TiffLayerSet,
     write_stats: bool,
 ) -> Result<(), String> {
-    let text =
-        fs::read_to_string(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-    let manifest: BatchManifest =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    let text = fs::read_to_string(manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let manifest: BatchManifest = serde_json::from_str(&text)
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
 
     fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
@@ -610,7 +411,24 @@ fn run_batch(
 
     for variant in &manifest.variants {
         let mut config = base.clone();
+        let sample = variant.patch.sample || manifest.base.sample;
+        let sample_seed = variant.patch.sample_seed.or(manifest.base.sample_seed);
+        let had_seed = variant.patch.seed.is_some() || manifest.base.seed.is_some();
         variant.patch.apply_to(&mut config)?;
+
+        if sample {
+            let priors = PriorSet::default_priors();
+            let used = sample_parameters(&mut config, &priors, sample_seed);
+            eprintln!(
+                "{}: sampled {} parameters (sample-seed {used})",
+                variant.name,
+                priors.enabled_count()
+            );
+            if !had_seed {
+                config.seed = rand::thread_rng().gen();
+                eprintln!("{}: map seed {}", variant.name, config.seed);
+            }
+        }
 
         let output = out_dir.join(format!("{}.{}", variant.name, format.extension()));
         let stats_path = if write_stats {
@@ -619,17 +437,7 @@ fn run_batch(
             None
         };
 
-        let start = Instant::now();
-        let map = generate_world(&config);
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        write_map_with_tiff_layers(&map, &output, format, *tiff_layers)
-            .map_err(|e| format!("write {}: {e}", output.display()))?;
-
-        if let Some(ref path) = stats_path {
-            let stats = compute_map_stats(&map, &config, elapsed);
-            write_map_stats(&stats, path).map_err(|e| format!("write {}: {e}", path.display()))?;
-        }
+        generate_write_and_stats(&config, &output, format, tiff_layers, stats_path.as_deref())?;
 
         eprintln!("{} -> {}", variant.name, output.display());
     }

@@ -3,8 +3,8 @@ use std::thread;
 use std::time::Instant;
 
 use terraforge::{
-    MapStats, ProgressHandle, WorldGenConfig, WorldMap, compute_map_stats,
-    generate_world_with_progress, new_progress_handle,
+    compute_map_stats, generate_world_with_progress, new_progress_handle, MapStats, ProgressHandle,
+    WorldGenConfig, WorldMap,
 };
 
 pub struct GenResult {

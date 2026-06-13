@@ -2,33 +2,23 @@
   "base": {
     "width": 512,
     "height": 512,
-    "seed": 42,
-    "plate_count": 24,
-    "land_mask_method": "Hybrid"
+    "seed": 42
   },
   "variants": [
     {
-      "name": "method_noise",
-      "land_mask_method": "Noise"
+      "name": "wavelength_short",
+      "elevation_wavelength_m": 2560.0
     },
     {
-      "name": "method_ca",
-      "land_mask_method": "CellularAutomata"
+      "name": "wavelength_long",
+      "elevation_wavelength_m": 10240.0
     },
     {
-      "name": "method_drunkard",
-      "land_mask_method": "DrunkardsWalk"
-    },
-    {
-      "name": "method_hybrid",
-      "land_mask_method": "Hybrid"
-    },
-    {
-      "name": "sea_034",
+      "name": "sea_low",
       "sea_level_m": -900.0
     },
     {
-      "name": "sea_042",
+      "name": "sea_high",
       "sea_level_m": 300.0,
       "seed": 7
     }

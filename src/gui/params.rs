@@ -1,8 +1,5 @@
 use egui::Ui;
-use terraforge::{
-    Celsius, Degrees, LandGenerationMode, LandMaskMethod, Meters, SquareKilometers, SquareMeters,
-    WindDirection, WorldGenConfig,
-};
+use terraforge::{ElevationEnvelopeConfig, Meters, SquareMeters, WorldGenConfig};
 
 const RESET_BTN: &str = "↺";
 
@@ -25,10 +22,6 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
     ui.label(format!(
         "Resolved sea level norm: {:.3}",
         resolved.sea_level_norm
-    ));
-    ui.label(format!(
-        "Resolved: {} plates | {} walkers | {} landmasses max",
-        resolved.plate_count, resolved.drunkard_walkers, resolved.max_landmasses
     ));
     ui.separator();
 
@@ -67,7 +60,12 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
             &mut config.max_elevation_m,
             defaults.max_elevation_m,
         );
-        meter_field(ui, "Sea level (m)", &mut config.sea_level_m, defaults.sea_level_m);
+        meter_field(
+            ui,
+            "Sea level (m)",
+            &mut config.sea_level_m,
+            defaults.sea_level_m,
+        );
         meter_field(
             ui,
             "Ocean floor (m)",
@@ -76,395 +74,105 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
         );
     });
 
-    egui::CollapsingHeader::new("Land generation").show(ui, |ui| {
-        f32_field(
+    egui::CollapsingHeader::new("Elevation noise")
+        .default_open(true)
+        .show(ui, |ui| {
+            meter_field(
+                ui,
+                "Continent wavelength (m)",
+                &mut config.continent_wavelength_m,
+                defaults.continent_wavelength_m,
+            );
+            meter_field(
+                ui,
+                "Detail wavelength (m)",
+                &mut config.detail_wavelength_m,
+                defaults.detail_wavelength_m,
+            );
+            u32_field(
+                ui,
+                "Elevation octaves",
+                &mut config.elevation_octaves,
+                defaults.elevation_octaves,
+                1.0,
+                Some(1..=12),
+            );
+            f64_field(
+                ui,
+                "Elevation persistence",
+                &mut config.elevation_persistence,
+                defaults.elevation_persistence,
+                0.01,
+                Some(0.1..=0.95),
+            );
+            f32_field(
+                ui,
+                "Continent weight",
+                &mut config.elevation_continent_weight,
+                defaults.elevation_continent_weight,
+                0.01,
+                Some(0.0..=1.0),
+            );
+            f32_field(
+                ui,
+                "Detail weight",
+                &mut config.elevation_detail_weight,
+                defaults.elevation_detail_weight,
+                0.01,
+                Some(0.0..=1.0),
+            );
+            f32_field(
+                ui,
+                "Ridge weight",
+                &mut config.elevation_ridge_weight,
+                defaults.elevation_ridge_weight,
+                0.01,
+                Some(0.0..=1.0),
+            );
+            optional_land_fraction_field(
+                ui,
+                &mut config.target_land_fraction,
+                defaults.target_land_fraction,
+            );
+            f32_field(
+                ui,
+                "Edge ocean bias",
+                &mut config.edge_ocean_bias,
+                defaults.edge_ocean_bias,
+                0.01,
+                Some(0.0..=0.5),
+            );
+        });
+
+    egui::CollapsingHeader::new("Elevation envelopes").show(ui, |ui| {
+        ui.label("Ridge envelope (mountain belts)");
+        draw_envelope_config(
             ui,
-            "Tectonic uplift scale",
-            &mut config.tectonic_uplift_scale,
-            defaults.tectonic_uplift_scale,
-            0.01,
-            Some(0.0..=3.0),
+            &mut config.elevation_ridge_envelope,
+            &defaults.elevation_ridge_envelope,
+        );
+        ui.separator();
+        ui.label("Detail envelope (ruggedness patches)");
+        draw_envelope_config(
+            ui,
+            &mut config.elevation_detail_envelope,
+            &defaults.elevation_detail_envelope,
         );
     });
 
-    egui::CollapsingHeader::new("Horizontal distances").show(ui, |ui| {
-        meter_field(
-            ui,
-            "Continental margin (m)",
-            &mut config.continental_margin_m,
-            defaults.continental_margin_m,
-        );
-        meter_field(
-            ui,
-            "Min isthmus width (m)",
-            &mut config.min_isthmus_width_m,
-            defaults.min_isthmus_width_m,
-        );
-        meter_field(
-            ui,
-            "Mountain belt width (m)",
-            &mut config.mountain_belt_width_m,
-            defaults.mountain_belt_width_m,
-        );
-        meter_field(
-            ui,
-            "Mountain coast buffer (m)",
-            &mut config.mountain_coast_buffer_m,
-            defaults.mountain_coast_buffer_m,
-        );
-        meter_field(
-            ui,
-            "Coast cleanup proximity (m)",
-            &mut config.coast_cleanup_proximity_m,
-            defaults.coast_cleanup_proximity_m,
-        );
-        meter_field(
-            ui,
-            "Drunkard brush radius (m)",
-            &mut config.drunkard_brush_radius_m,
-            defaults.drunkard_brush_radius_m,
-        );
-        meter_field(
-            ui,
-            "River min length (m)",
-            &mut config.river_min_length_m,
-            defaults.river_min_length_m,
-        );
-    });
-
-    egui::CollapsingHeader::new("Areas").show(ui, |ui| {
+    egui::CollapsingHeader::new("Water").show(ui, |ui| {
         square_meter_field(
             ui,
             "Min lake area (m²)",
             &mut config.min_lake_area_m2,
             defaults.min_lake_area_m2,
         );
-        square_km_field(
-            ui,
-            "River min drainage (km²)",
-            &mut config.river_min_drainage_area_km2,
-            defaults.river_min_drainage_area_km2,
-        );
-        square_km_field(
-            ui,
-            "River tributary drainage (km²)",
-            &mut config.river_tributary_drainage_area_km2,
-            defaults.river_tributary_drainage_area_km2,
-        );
     });
 
-    egui::CollapsingHeader::new("Mountains").show(ui, |ui| {
+    egui::CollapsingHeader::new("Temperature").show(ui, |ui| {
         meter_field(
             ui,
-            "Min elevation (m)",
-            &mut config.mountain_min_elevation_m,
-            defaults.mountain_min_elevation_m,
-        );
-        degree_field(
-            ui,
-            "Min slope (°)",
-            &mut config.mountain_min_slope_deg,
-            defaults.mountain_min_slope_deg,
-        );
-        f32_field(
-            ui,
-            "Orogeny mountain threshold",
-            &mut config.orogeny_mountain_threshold,
-            defaults.orogeny_mountain_threshold,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        f32_field(
-            ui,
-            "Mountain cluster threshold",
-            &mut config.mountain_cluster_threshold,
-            defaults.mountain_cluster_threshold,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        bool_field(
-            ui,
-            "Use orogeny mountains",
-            &mut config.use_orogeny_mountains,
-            defaults.use_orogeny_mountains,
-        );
-        f32_field(
-            ui,
-            "Mountain boundary weight",
-            &mut config.mountain_boundary_weight,
-            defaults.mountain_boundary_weight,
-            0.01,
-            Some(0.0..=2.0),
-        );
-        meter_field(
-            ui,
-            "Orogeny interior min dist (m)",
-            &mut config.orogeny_interior_min_dist_m,
-            defaults.orogeny_interior_min_dist_m,
-        );
-        meter_field(
-            ui,
-            "Orogeny peak radius (m)",
-            &mut config.orogeny_peak_radius_m,
-            defaults.orogeny_peak_radius_m,
-        );
-        bool_field(
-            ui,
-            "Mountain noise orogeny only",
-            &mut config.mountain_noise_orogeny_only,
-            defaults.mountain_noise_orogeny_only,
-        );
-    });
-
-    egui::CollapsingHeader::new("Oceans").show(ui, |ui| {
-        meter_field(
-            ui,
-            "Shelf width (m)",
-            &mut config.shelf_width_m,
-            defaults.shelf_width_m,
-        );
-        meter_field(
-            ui,
-            "Shelf depth (m)",
-            &mut config.shelf_depth_m,
-            defaults.shelf_depth_m,
-        );
-    });
-
-    egui::CollapsingHeader::new("Land texture").show(ui, |ui| {
-        land_mask_method_field(ui, &mut config.land_mask_method, defaults.land_mask_method);
-        meter_field(
-            ui,
-            "Texture strength (m)",
-            &mut config.land_texture_strength_m,
-            defaults.land_texture_strength_m,
-        );
-        meter_field(
-            ui,
-            "Texture coast band (m)",
-            &mut config.land_texture_coast_band_m,
-            defaults.land_texture_coast_band_m,
-        );
-        meter_field(
-            ui,
-            "Island zone (m)",
-            &mut config.island_zone_m,
-            defaults.island_zone_m,
-        );
-        f32_field(
-            ui,
-            "Hybrid noise blend",
-            &mut config.hybrid_noise_blend,
-            defaults.hybrid_noise_blend,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        bool_field(
-            ui,
-            "Use plate macro mask",
-            &mut config.use_plate_macro_mask,
-            defaults.use_plate_macro_mask,
-        );
-        f32_field(
-            ui,
-            "CA fill probability",
-            &mut config.ca_fill_probability,
-            defaults.ca_fill_probability,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        u32_field(
-            ui,
-            "CA iterations",
-            &mut config.ca_iterations,
-            defaults.ca_iterations,
-            1.0,
-            None,
-        );
-        u32_field(
-            ui,
-            "CA smoothing passes",
-            &mut config.ca_smoothing_passes,
-            defaults.ca_smoothing_passes,
-            1.0,
-            None,
-        );
-        meter_field(
-            ui,
-            "CA coarse cell size (m)",
-            &mut config.ca_coarse_cell_size_m,
-            defaults.ca_coarse_cell_size_m,
-        );
-        f64_field(
-            ui,
-            "Drunkard walker density (per km²)",
-            &mut config.drunkard_walker_density_per_km2,
-            defaults.drunkard_walker_density_per_km2,
-            0.01,
-            Some(0.0..=5.0),
-        );
-        u32_field(
-            ui,
-            "Drunkard steps (0 = auto)",
-            &mut config.drunkard_steps,
-            defaults.drunkard_steps,
-            10.0,
-            None,
-        );
-        meter_field(
-            ui,
-            "Land shape cell size (m)",
-            &mut config.land_shape_cell_size_m,
-            defaults.land_shape_cell_size_m,
-        );
-        meter_field(
-            ui,
-            "Land mask blur (m)",
-            &mut config.land_mask_blur_m,
-            defaults.land_mask_blur_m,
-        );
-        meter_field(
-            ui,
-            "Land mask close radius (m)",
-            &mut config.land_mask_close_radius_m,
-            defaults.land_mask_close_radius_m,
-        );
-        square_km_field(
-            ui,
-            "Min landmass area (km²)",
-            &mut config.min_landmass_area_km2,
-            defaults.min_landmass_area_km2,
-        );
-        f64_field(
-            ui,
-            "Max landmass density (per km²)",
-            &mut config.max_landmass_density_per_km2,
-            defaults.max_landmass_density_per_km2,
-            0.005,
-            Some(0.0..=1.0),
-        );
-        meter_field(
-            ui,
-            "Drunkard path length (m)",
-            &mut config.drunkard_path_length_m,
-            defaults.drunkard_path_length_m,
-        );
-        f32_field(
-            ui,
-            "Max landmass compactness",
-            &mut config.max_landmass_compactness,
-            defaults.max_landmass_compactness,
-            1.0,
-            Some(1.0..=500.0),
-        );
-    });
-
-    egui::CollapsingHeader::new("Plates").show(ui, |ui| {
-        f64_field(
-            ui,
-            "Plate density (per km²)",
-            &mut config.plate_density_per_km2,
-            defaults.plate_density_per_km2,
-            0.01,
-            Some(0.01..=2.0),
-        );
-        ui.label(format!(
-            "Resolved plate count for current extent: {}",
-            resolved.plate_count
-        ));
-        f32_field(
-            ui,
-            "Continental plate fraction",
-            &mut config.continental_plate_fraction,
-            defaults.continental_plate_fraction,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        f32_field(
-            ui,
-            "Oceanic uplift factor",
-            &mut config.oceanic_uplift_factor,
-            defaults.oceanic_uplift_factor,
-            0.01,
-            Some(0.0..=2.0),
-        );
-        f32_field(
-            ui,
-            "Plate boundary strength",
-            &mut config.plate_boundary_strength,
-            defaults.plate_boundary_strength,
-            0.01,
-            Some(0.0..=2.0),
-        );
-        u32_field(
-            ui,
-            "Lloyd relaxation iterations",
-            &mut config.plate_lloyd_iterations,
-            defaults.plate_lloyd_iterations,
-            1.0,
-            Some(0..=8),
-        );
-        f32_field(
-            ui,
-            "Continental plate speed max",
-            &mut config.continental_plate_speed_max,
-            defaults.continental_plate_speed_max,
-            0.01,
-            Some(0.0..=2.0),
-        );
-        f32_field(
-            ui,
-            "Oceanic plate speed min",
-            &mut config.oceanic_plate_speed_min,
-            defaults.oceanic_plate_speed_min,
-            0.01,
-            Some(0.0..=2.0),
-        );
-        f64_field(
-            ui,
-            "Mantle flow angle (°)",
-            &mut config.mantle_flow_angle_deg,
-            defaults.mantle_flow_angle_deg,
-            1.0,
-            Some(-180.0..=180.0),
-        );
-    });
-
-    egui::CollapsingHeader::new("Coast").show(ui, |ui| {
-        f32_field(
-            ui,
-            "Coast sharpening",
-            &mut config.coast_sharpening,
-            defaults.coast_sharpening,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        u32_field(
-            ui,
-            "Coast cleanup passes",
-            &mut config.coast_cleanup_passes,
-            defaults.coast_cleanup_passes,
-            1.0,
-            None,
-        );
-    });
-
-    egui::CollapsingHeader::new("Climate").show(ui, |ui| {
-        celsius_field(
-            ui,
-            "Equator mean temp (°C)",
-            &mut config.equator_mean_temp_c,
-            defaults.equator_mean_temp_c,
-        );
-        celsius_field(
-            ui,
-            "Pole mean temp (°C)",
-            &mut config.pole_mean_temp_c,
-            defaults.pole_mean_temp_c,
-        );
-        meter_field(
-            ui,
-            "Temperature wavelength (m)",
+            "Noise wavelength (m)",
             &mut config.temperature_wavelength_m,
             defaults.temperature_wavelength_m,
         );
@@ -476,19 +184,45 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
             0.1,
             Some(0.0..=20.0),
         );
+        f64_field(
+            ui,
+            "Temperature range (°C)",
+            &mut config.temperature_range_c,
+            defaults.temperature_range_c,
+            1.0,
+            Some(10.0..=120.0),
+        );
+        ui.label("Range scales how strongly elevation cools (not a lat gradient).");
+    });
+
+    egui::CollapsingHeader::new("Rainfall").show(ui, |ui| {
         f32_field(
             ui,
             "Rainfall scale",
             &mut config.rainfall_scale,
             defaults.rainfall_scale,
             0.01,
-            Some(0.0..=3.0),
+            Some(0.0..=5.0),
         );
         f32_field(
             ui,
-            "Orographic orogeny weight",
-            &mut config.orographic_orogeny_weight,
-            defaults.orographic_orogeny_weight,
+            "Coastal rainfall boost",
+            &mut config.continentality_strength,
+            defaults.continentality_strength,
+            0.01,
+            Some(0.0..=1.0),
+        );
+        meter_field(
+            ui,
+            "Coastal influence range (m)",
+            &mut config.continentality_ocean_range_m,
+            defaults.continentality_ocean_range_m,
+        );
+        f32_field(
+            ui,
+            "Rain shadow weight",
+            &mut config.orographic_elevation_weight,
+            defaults.orographic_elevation_weight,
             0.01,
             Some(0.0..=2.0),
         );
@@ -498,155 +232,102 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
             &mut config.interior_drying_factor,
             defaults.interior_drying_factor,
             0.01,
-            Some(0.0..=1.0),
+            Some(0.0..=0.5),
         );
-        f32_field(
-            ui,
-            "Continentality strength",
-            &mut config.continentality_strength,
-            defaults.continentality_strength,
-            0.01,
-            Some(0.0..=1.0),
-        );
-        meter_field(
-            ui,
-            "Continentality ocean range (m)",
-            &mut config.continentality_ocean_range_m,
-            defaults.continentality_ocean_range_m,
-        );
-        wind_direction_field(ui, &mut config.wind_direction, defaults.wind_direction);
     });
 
-    egui::CollapsingHeader::new("Landscape evolution").show(ui, |ui| {
-        bool_field(
+    egui::CollapsingHeader::new("Biomes").show(ui, |ui| {
+        meter_field(
             ui,
-            "Enabled",
-            &mut config.landscape_evolution_enabled,
-            defaults.landscape_evolution_enabled,
+            "Mountain min elevation (m)",
+            &mut config.mountain_min_elevation_m,
+            defaults.mountain_min_elevation_m,
         );
-        u32_field(
+        f64_field(
             ui,
-            "Iterations",
-            &mut config.landscape_evolution_iterations,
-            defaults.landscape_evolution_iterations,
-            1.0,
-            Some(1..=64),
-        );
-        u32_field(
-            ui,
-            "Coarse hydro factor",
-            &mut config.coarse_hydro_factor,
-            defaults.coarse_hydro_factor,
-            1.0,
-            Some(1..=16),
-        );
-        u32_field(
-            ui,
-            "Full-res passes",
-            &mut config.landscape_evolution_full_res_passes,
-            defaults.landscape_evolution_full_res_passes,
-            1.0,
-            Some(0..=32),
-        );
-        f32_field(
-            ui,
-            "Erosion factor",
-            &mut config.landscape_erosion_factor,
-            defaults.landscape_erosion_factor,
-            0.0005,
-            Some(0.0..=0.05),
-        );
-        f32_field(
-            ui,
-            "Uplift factor",
-            &mut config.landscape_uplift_factor,
-            defaults.landscape_uplift_factor,
-            0.0005,
-            Some(0.0..=0.05),
-        );
-        f32_field(
-            ui,
-            "Erodibility plains",
-            &mut config.erodibility_plains,
-            defaults.erodibility_plains,
+            "Mountain min slope (°)",
+            &mut config.mountain_min_slope_deg.0,
+            defaults.mountain_min_slope_deg.0,
             0.1,
-            Some(0.1..=10.0),
+            Some(0.5..=45.0),
         );
         f32_field(
             ui,
-            "Erodibility mountains",
-            &mut config.erodibility_mountains,
-            defaults.erodibility_mountains,
-            0.1,
-            Some(0.1..=10.0),
-        );
-        f32_field(
-            ui,
-            "Rainfall erodibility coupling",
-            &mut config.rainfall_erodibility_coupling,
-            defaults.rainfall_erodibility_coupling,
+            "Min ridge influence",
+            &mut config.mountain_min_ridge_influence,
+            defaults.mountain_min_ridge_influence,
             0.01,
             Some(0.0..=1.0),
-        );
-    });
-
-    egui::CollapsingHeader::new("Rivers").show(ui, |ui| {
-        bool_field(
-            ui,
-            "River incision enabled",
-            &mut config.river_incision_enabled,
-            defaults.river_incision_enabled,
-        );
-        f32_field(
-            ui,
-            "River incision factor",
-            &mut config.river_incision_factor,
-            defaults.river_incision_factor,
-            0.0005,
-            Some(0.0..=0.05),
-        );
-        f32_field(
-            ui,
-            "River meander strength",
-            &mut config.river_meander_strength,
-            defaults.river_meander_strength,
-            0.01,
-            Some(0.0..=1.0),
-        );
-    });
-
-    egui::CollapsingHeader::new("Noise wavelengths").show(ui, |ui| {
-        meter_field(
-            ui,
-            "Continent wavelength (m)",
-            &mut config.continent_wavelength_m,
-            defaults.continent_wavelength_m,
-        );
-        meter_field(
-            ui,
-            "Hill wavelength (m)",
-            &mut config.hill_wavelength_m,
-            defaults.hill_wavelength_m,
-        );
-        meter_field(
-            ui,
-            "Mountain detail wavelength (m)",
-            &mut config.mountain_detail_wavelength_m,
-            defaults.mountain_detail_wavelength_m,
-        );
-        meter_field(
-            ui,
-            "Land mask wavelength (m)",
-            &mut config.land_mask_wavelength_m,
-            defaults.land_mask_wavelength_m,
         );
     });
 }
 
+fn draw_envelope_config(
+    ui: &mut Ui,
+    value: &mut ElevationEnvelopeConfig,
+    default: &ElevationEnvelopeConfig,
+) {
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut value.enabled, "Enabled");
+        if reset_button(ui) {
+            *value = default.clone();
+        }
+    });
+    meter_field(
+        ui,
+        "Envelope wavelength (m)",
+        &mut value.wavelength_m,
+        default.wavelength_m,
+    );
+    u32_field(
+        ui,
+        "Envelope octaves",
+        &mut value.octaves,
+        default.octaves,
+        1.0,
+        Some(1..=8),
+    );
+    f32_field(
+        ui,
+        "Envelope floor",
+        &mut value.floor,
+        default.floor,
+        0.01,
+        Some(0.0..=1.0),
+    );
+    f32_field(
+        ui,
+        "Envelope strength",
+        &mut value.strength,
+        default.strength,
+        0.01,
+        Some(0.0..=2.0),
+    );
+}
+
+fn optional_land_fraction_field(ui: &mut Ui, value: &mut Option<f32>, default: Option<f32>) {
+    ui.label("Target land fraction (None = off)");
+    ui.horizontal(|ui| {
+        let mut enabled = value.is_some();
+        if ui.checkbox(&mut enabled, "Enable").changed() {
+            *value = if enabled {
+                default.or(Some(0.35))
+            } else {
+                None
+            };
+        }
+        if let Some(v) = value.as_mut() {
+            ui.add(egui::DragValue::new(v).speed(0.01).range(0.05..=0.95));
+        }
+        if reset_button(ui) {
+            *value = default;
+        }
+    });
+    ui.add_space(4.0);
+}
+
 fn reset_button(ui: &mut Ui) -> bool {
-    ui.small_button(RESET_BTN)
-        .on_hover_text("Reset to default")
-        .clicked()
+    ui.small_button(RESET_BTN).clicked()
 }
 
 fn meter_field(ui: &mut Ui, label: &str, value: &mut Meters, default: Meters) {
@@ -664,48 +345,6 @@ fn square_meter_field(ui: &mut Ui, label: &str, value: &mut SquareMeters, defaul
     ui.label(label);
     ui.horizontal(|ui| {
         ui.add(egui::DragValue::new(&mut value.0).speed(10.0));
-        if reset_button(ui) {
-            *value = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn square_km_field(
-    ui: &mut Ui,
-    label: &str,
-    value: &mut SquareKilometers,
-    default: SquareKilometers,
-) {
-    ui.label(label);
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::DragValue::new(&mut value.0)
-                .speed(0.001)
-                .range(0.0..=100.0),
-        );
-        if reset_button(ui) {
-            *value = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn celsius_field(ui: &mut Ui, label: &str, value: &mut Celsius, default: Celsius) {
-    ui.label(label);
-    ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut value.0).speed(0.5));
-        if reset_button(ui) {
-            *value = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn degree_field(ui: &mut Ui, label: &str, value: &mut Degrees, default: Degrees) {
-    ui.label(label);
-    ui.horizontal(|ui| {
-        ui.add(egui::DragValue::new(&mut value.0).speed(0.1).range(0.0..=90.0));
         if reset_button(ui) {
             *value = default;
         }
@@ -810,59 +449,4 @@ fn usize_field(
         }
     });
     ui.add_space(4.0);
-}
-
-fn bool_field(ui: &mut Ui, label: &str, value: &mut bool, default: bool) {
-    ui.label(label);
-    ui.horizontal(|ui| {
-        ui.checkbox(value, "");
-        if reset_button(ui) {
-            *value = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn land_mask_method_field(ui: &mut Ui, method: &mut LandMaskMethod, default: LandMaskMethod) {
-    ui.label("Land mask method");
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("land_mask_method")
-            .selected_text(land_mask_label(*method))
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(method, LandMaskMethod::Hybrid, "Hybrid");
-                ui.selectable_value(method, LandMaskMethod::Noise, "Noise");
-                ui.selectable_value(method, LandMaskMethod::CellularAutomata, "CellularAutomata");
-                ui.selectable_value(method, LandMaskMethod::DrunkardsWalk, "DrunkardsWalk");
-            });
-        if reset_button(ui) {
-            *method = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn wind_direction_field(ui: &mut Ui, direction: &mut WindDirection, default: WindDirection) {
-    ui.label("Wind direction");
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("wind_direction")
-            .selected_text("WestToEast")
-            .width(180.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(direction, WindDirection::WestToEast, "WestToEast");
-            });
-        if reset_button(ui) {
-            *direction = default;
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn land_mask_label(method: LandMaskMethod) -> &'static str {
-    match method {
-        LandMaskMethod::Hybrid => "Hybrid",
-        LandMaskMethod::Noise => "Noise",
-        LandMaskMethod::CellularAutomata => "CellularAutomata",
-        LandMaskMethod::DrunkardsWalk => "DrunkardsWalk",
-    }
 }

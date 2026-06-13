@@ -3,14 +3,13 @@ use std::fs;
 use eframe::egui;
 use rand::Rng;
 use terraforge::{
-    LEGEND_ENTRIES, PreviewLayer, PriorSet, RIVER_RGBA, WorldGenConfig, WorldMap, biome_rgba,
-    write_map_png,
+    biome_rgba, write_map_png, PreviewLayer, PriorSet, WorldGenConfig, WorldMap, LEGEND_ENTRIES,
 };
 
 use super::params::draw_params;
+use super::preview::{upload_map_texture, MapTexture};
 use super::sampling::draw_sampling;
-use super::preview::{MapTexture, upload_map_texture};
-use super::worker::{GenJob, GenResult, poll_progress, spawn_generation};
+use super::worker::{poll_progress, spawn_generation, GenJob, GenResult};
 
 const MAP_ZOOM_MIN: f32 = 0.25;
 const MAP_ZOOM_MAX: f32 = 16.0;
@@ -18,11 +17,7 @@ const MAP_ZOOM_MAX: f32 = 16.0;
 enum GenState {
     Idle,
     Running(GenJob),
-    Done {
-        map: WorldMap,
-        stats: terraforge::MapStats,
-        elapsed_ms: u64,
-    },
+    Done(Box<GenResult>),
     Error(String),
 }
 
@@ -32,7 +27,6 @@ pub struct MapGuiApp {
     calibrate_land_target: f32,
     gen_state: GenState,
     layer: PreviewLayer,
-    rivers_overlay: bool,
     texture: Option<MapTexture>,
     map_zoom: f32,
     map_zoom_fit: bool,
@@ -51,7 +45,6 @@ impl MapGuiApp {
             calibrate_land_target: 0.30,
             gen_state: GenState::Idle,
             layer: PreviewLayer::Biomes,
-            rivers_overlay: true,
             texture: None,
             map_zoom: 1.0,
             map_zoom_fit: false,
@@ -109,29 +102,18 @@ impl MapGuiApp {
     }
 
     fn on_generation_complete(&mut self, ctx: &egui::Context, gen: GenResult) {
-        self.texture = Some(upload_map_texture(
-            ctx,
-            &gen.map,
-            self.layer,
-            self.rivers_overlay,
-            None,
-        ));
+        self.texture = Some(upload_map_texture(ctx, &gen.map, self.layer, None));
         self.status_message = format!("Done in {} ms", gen.elapsed_ms);
-        self.gen_state = GenState::Done {
-            map: gen.map,
-            stats: gen.stats,
-            elapsed_ms: gen.elapsed_ms,
-        };
+        self.gen_state = GenState::Done(Box::new(gen));
     }
 
     fn refresh_texture(&mut self, ctx: &egui::Context) {
-        if let GenState::Done { map, .. } = &self.gen_state {
-            let map = map.clone();
+        if let GenState::Done(gen) = &self.gen_state {
+            let map = gen.map.clone();
             self.texture = Some(upload_map_texture(
                 ctx,
                 &map,
                 self.layer,
-                self.rivers_overlay,
                 Some("map_preview"),
             ));
         }
@@ -172,12 +154,16 @@ impl MapGuiApp {
                 .range(MAP_ZOOM_MIN..=MAP_ZOOM_MAX)
                 .suffix("×"),
         );
-        ui.label(egui::RichText::new("Scroll over map to zoom").weak().small());
+        ui.label(
+            egui::RichText::new("Scroll over map to zoom")
+                .weak()
+                .small(),
+        );
     }
 
     fn current_map(&self) -> Option<&WorldMap> {
         match &self.gen_state {
-            GenState::Done { map, .. } => Some(map),
+            GenState::Done(gen) => Some(&gen.map),
             _ => None,
         }
     }
@@ -192,7 +178,9 @@ impl MapGuiApp {
             {
                 match serde_json::to_string_pretty(&self.config) {
                     Ok(json) => match fs::write(&path, json) {
-                        Ok(()) => self.status_message = format!("Saved preset to {}", path.display()),
+                        Ok(()) => {
+                            self.status_message = format!("Saved preset to {}", path.display())
+                        }
                         Err(e) => self.status_message = format!("Save failed: {e}"),
                     },
                     Err(e) => self.status_message = format!("Serialize failed: {e}"),
@@ -209,7 +197,9 @@ impl MapGuiApp {
                     .save_file()
                 {
                     match write_map_png(&map, &path) {
-                        Ok(()) => self.status_message = format!("Exported PNG to {}", path.display()),
+                        Ok(()) => {
+                            self.status_message = format!("Exported PNG to {}", path.display())
+                        }
                         Err(e) => self.status_message = format!("Export failed: {e}"),
                     }
                 }
@@ -274,13 +264,9 @@ impl MapGuiApp {
 
     fn draw_preview_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut layer_changed = false;
-        let mut overlay_changed = false;
 
         ui.horizontal(|ui| {
             ui.label("Layer:");
-            overlay_changed = ui
-                .checkbox(&mut self.rivers_overlay, "Rivers overlay")
-                .changed();
         });
         ui.horizontal_wrapped(|ui| {
             for layer in PreviewLayer::ALL {
@@ -298,7 +284,7 @@ impl MapGuiApp {
             self.draw_zoom_controls(ui);
         });
 
-        if layer_changed || overlay_changed {
+        if layer_changed {
             self.refresh_texture(ctx);
         }
 
@@ -366,28 +352,23 @@ impl MapGuiApp {
             .show(ui, |ui| {
                 for (name, biome) in LEGEND_ENTRIES {
                     let rgba = biome_rgba(*biome);
-                    let color = egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+                    let color =
+                        egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
                     ui.colored_label(color, "■");
                     ui.label(*name);
                     ui.end_row();
                 }
-                let river_color = egui::Color32::from_rgba_unmultiplied(
-                    RIVER_RGBA[0],
-                    RIVER_RGBA[1],
-                    RIVER_RGBA[2],
-                    RIVER_RGBA[3],
-                );
-                ui.colored_label(river_color, "■");
-                ui.label("River");
-                ui.end_row();
             });
     }
 
     fn draw_stats(&mut self, ui: &mut egui::Ui) {
-        let (stats, elapsed_ms, map) = match &self.gen_state {
-            GenState::Done { stats, elapsed_ms, map, .. } => (stats, elapsed_ms, map),
+        let gen = match &self.gen_state {
+            GenState::Done(gen) => gen,
             _ => return,
         };
+        let stats = &gen.stats;
+        let elapsed_ms = gen.elapsed_ms;
+        let map = &gen.map;
         ui.heading("Stats");
         ui.label(format!(
             "Extent: {:.2} × {:.2} km",
@@ -408,10 +389,9 @@ impl MapGuiApp {
                     .range(0.05..=0.95),
             );
             if ui.button("Apply").clicked() {
-                let suggested = self.config.suggest_sea_level_m_for_fraction(
-                    &map.elevation,
-                    self.calibrate_land_target,
-                );
+                let suggested = self
+                    .config
+                    .suggest_sea_level_m_for_fraction(&map.elevation, self.calibrate_land_target);
                 self.config.sea_level_m = suggested;
                 self.status_message = format!(
                     "Sea level set to {:.0} m for ~{:.0}% land (re-generate to apply)",
@@ -472,7 +452,7 @@ impl eframe::App for MapGuiApp {
                     .show(ui, |ui| {
                         self.draw_legend(ui);
                         if self.layer == PreviewLayer::Biomes
-                            && matches!(self.gen_state, GenState::Done { .. })
+                            && matches!(self.gen_state, GenState::Done(_))
                         {
                             ui.add_space(12.0);
                             ui.separator();

@@ -81,10 +81,7 @@ mod tests {
     #[test]
     fn area_to_cells_default_grid() {
         assert_eq!(SquareMeters(9600.0).to_cell_count(20.0), 24);
-        assert_eq!(
-            SquareKilometers(0.01536).to_cell_count(20.0),
-            38
-        );
+        assert_eq!(SquareKilometers(0.01536).to_cell_count(20.0), 38);
     }
 
     #[test]

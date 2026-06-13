@@ -1,7 +1,5 @@
 use super::world::Biome;
 
-pub const RIVER_RGBA: [u8; 4] = [30, 80, 200, 255];
-
 pub fn biome_rgba(biome: Biome) -> [u8; 4] {
     match biome {
         Biome::Ocean => [25, 55, 130, 255],

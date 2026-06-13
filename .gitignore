@@ -1,4 +1,10 @@
 /target/
 /out/
-**/*.png
+/out/**/*.png
 **/*_stats.json
+*.tiff
+*.tif
+.DS_Store
+Thumbs.db
+desktop.ini
+.cursor

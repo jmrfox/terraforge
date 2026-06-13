@@ -2,12 +2,9 @@ use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
 use super::config::{ResolvedSimParams, WorldGenConfig};
-use super::progress::{ProgressHandle, report_stage};
+use super::grid_ops::normalize01;
+use super::progress::{report_stage, ProgressHandle};
 use super::world::WorldMap;
-
-fn normalize01(v: f32) -> f32 {
-    v.clamp(0.0, 1.0)
-}
 
 struct TemperatureNoise {
     field: Fbm<Perlin>,
@@ -29,8 +26,10 @@ impl TemperatureNoise {
     }
 }
 
-/// Macro temperature from spatial noise (pole/equator config sets the value range), plus
-/// elevation cooling and continentality modifiers.
+/// Temperature from spatial noise minus elevation lapse (no latitude/longitude).
+///
+/// Sea-level cells can still be cold when the noise field is low; high terrain is
+/// always colder than the noise baseline at the same horizontal location.
 pub fn generate_temperature(
     map: &mut WorldMap,
     config: &WorldGenConfig,
@@ -39,19 +38,17 @@ pub fn generate_temperature(
     stage_start: f32,
     stage_end: f32,
 ) {
+    let w = map.width;
+    let h = map.height;
     let climate = TemperatureNoise::new(config, params);
-    let dist_to_ocean = &map.dist_to_water;
-    let ocean_range = params.continentality_ocean_range_cells.max(1) as f32;
-    let continentality = config.continentality_strength;
-
-    let width = map.width;
-    let height = map.height;
-    let water_mask = map.water_mask.as_slice();
+    let sea = params.sea_level_norm;
+    let cooling = params.elevation_cooling_factor;
+    let width_f = w as f32;
+    let height_f = h as f32;
     let elevation = map.elevation.as_slice();
-    let elevation_cooling_factor = params.elevation_cooling_factor;
 
     map.temperature
-        .par_chunks_mut(width)
+        .par_chunks_mut(w)
         .enumerate()
         .for_each(|(y, row)| {
             if y % 8 == 0 {
@@ -59,24 +56,19 @@ pub fn generate_temperature(
                     progress,
                     stage_start,
                     stage_end,
-                    y as f32 / height as f32,
+                    y as f32 / height_f,
                     "Simulating temperature",
                 );
             }
+            let ny = y as f32 / height_f.max(1.0);
+
             for (x, cell) in row.iter_mut().enumerate() {
-                let idx = y * width + x;
-                let nx = x as f32 / width as f32;
-                let ny = y as f32 / height as f32;
-                let mut temp = climate.sample(nx, ny);
+                let idx = y * w + x;
+                let nx = x as f32 / width_f.max(1.0);
 
-                if !water_mask[idx] {
-                    temp -= elevation[idx] * elevation_cooling_factor;
-                    let ocean_prox = (dist_to_ocean[idx] as f32 / ocean_range).clamp(0.0, 1.0);
-                    let continental_factor = (1.0 - ocean_prox) * continentality;
-                    temp -= continental_factor * 0.08;
-                }
-
-                *cell = normalize01(temp);
+                let noise = climate.sample(nx, ny);
+                let elev_above_sea = (elevation[idx] - sea).max(0.0);
+                *cell = normalize01(noise - elev_above_sea * cooling);
             }
         });
 }
@@ -84,35 +76,47 @@ pub fn generate_temperature(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generate_world;
+    use crate::config::WorldGenConfig;
+    use crate::world::WorldMap;
 
     #[test]
-    fn temperature_is_not_latitude_driven() {
-        let config = WorldGenConfig {
-            width: 256,
-            height: 256,
-            seed: 42,
-            ..Default::default()
-        };
-        let map = generate_world(&config);
-        let w = map.width;
-        let h = map.height;
-
-        let row_mean = |y: usize| -> f32 {
-            let row = &map.temperature[y * w..(y + 1) * w];
-            row.iter().sum::<f32>() / row.len() as f32
-        };
-
-        let top = row_mean(0);
-        let mid = row_mean(h / 2);
-        let bottom = row_mean(h - 1);
+    fn sea_level_can_be_cold_from_noise() {
+        let config = WorldGenConfig::test_config(42, 128);
+        let params = config.resolve();
+        let mut map = WorldMap::new(128, 128, config.seed);
+        map.elevation.fill(params.sea_level_norm);
+        generate_temperature(&mut map, &config, &params, &None, 0.0, 1.0);
+        let min = map
+            .temperature
+            .iter()
+            .cloned()
+            .fold(f32::INFINITY, f32::min);
+        let max = map
+            .temperature
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(
-            (top - bottom).abs() < 0.25,
-            "latitude gradient removed: top={top:.3} bottom={bottom:.3}"
+            min < 0.5,
+            "noise should produce cold sea-level cells, min={min}"
         );
         assert!(
-            (mid - top).abs() > 0.02 || (mid - bottom).abs() > 0.02,
-            "temperature field should vary spatially: top={top:.3} mid={mid:.3} bottom={bottom:.3}"
+            max > 0.5,
+            "noise should produce warm sea-level cells, max={max}"
         );
+    }
+
+    #[test]
+    fn high_elevation_cooler_than_nearby_low_at_same_noise_scale() {
+        let config = WorldGenConfig::test_config(42, 64);
+        let params = config.resolve();
+        let mut map = WorldMap::new(64, 64, config.seed);
+        map.elevation.fill(params.sea_level_norm);
+        let peak = map.index(32, 32);
+        map.elevation[peak] = 0.95;
+        generate_temperature(&mut map, &config, &params, &None, 0.0, 1.0);
+        let low = map.temperature[map.index(10, 10)];
+        let high = map.temperature[peak];
+        assert!(high < low, "peak should be colder: high={high} low={low}");
     }
 }

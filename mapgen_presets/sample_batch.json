@@ -1,0 +1,17 @@
+{
+  "base": {
+    "width": 512,
+    "height": 512,
+    "sample": true
+  },
+  "variants": [
+    { "name": "world_01" },
+    { "name": "world_02" },
+    { "name": "world_03" },
+    {
+      "name": "world_repro",
+      "sample_seed": 99,
+      "seed": 42
+    }
+  ]
+}
