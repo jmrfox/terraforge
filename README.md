@@ -4,6 +4,14 @@ Deterministic procedural 2D world map generation for games and tools.
 
 Pipeline: **elevation → temperature → rainfall → water → biomes**
 
+<p align="center">
+  <img src="examples/1.png" width="256" alt="Example map 1" />
+  <img src="examples/2.png" width="256" alt="Example map 2" />
+  <br />
+  <img src="examples/3.png" width="256" alt="Example map 3" />
+  <img src="examples/4.png" width="256" alt="Example map 4" />
+</p>
+
 Requires stable Rust. The GUI binary needs `--features gui`.
 
 ## Install (Rust dependency)
