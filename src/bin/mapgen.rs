@@ -8,6 +8,7 @@
 //! cargo run --bin mapgen -- --batch mapgen_presets/sample_batch.json --out-dir out/
 //! ```
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -16,9 +17,10 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use rand::Rng;
 use serde::Deserialize;
+use serde_json::Value;
 
 use terraforge::{
-    compute_map_stats, generate_world, sample_parameters, write_map_stats,
+    compute_map_stats, sample_parameters, try_generate_world, write_map_stats,
     write_map_with_tiff_layers, Degrees, MapExportFormat, Meters, PriorSet, SquareMeters,
     TiffLayerSet, WorldGenConfig,
 };
@@ -188,8 +190,17 @@ struct ConfigParams {
 #[derive(Deserialize)]
 struct BatchManifest {
     #[serde(default)]
-    base: ConfigParams,
+    base: BatchBase,
     variants: Vec<BatchVariant>,
+}
+
+#[derive(Default, Deserialize)]
+struct BatchBase {
+    #[serde(flatten)]
+    params: ConfigParams,
+    /// Keys not recognized by `params`, reported as errors.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -197,6 +208,28 @@ struct BatchVariant {
     name: String,
     #[serde(flatten)]
     patch: ConfigParams,
+    /// Keys not recognized by `patch`, reported as errors.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, Value>,
+}
+
+impl BatchManifest {
+    fn check_unknown_fields(&self) -> Result<(), String> {
+        let sections = std::iter::once(("base", &self.base.unknown))
+            .chain(self.variants.iter().map(|v| (v.name.as_str(), &v.unknown)));
+        let issues: Vec<String> = sections
+            .flat_map(|(section, unknown)| {
+                unknown
+                    .keys()
+                    .map(move |key| format!("{section}: unknown field `{key}`"))
+            })
+            .collect();
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(issues.join("; "))
+        }
+    }
 }
 
 impl ConfigParams {
@@ -222,8 +255,8 @@ impl ConfigParams {
         if let Some(v) = self.ocean_floor {
             config.ocean_floor_m = Meters(v);
         }
+        // Legacy spelling of the continent wavelength in CLI flags and batch manifests.
         if let Some(v) = self.elevation_wavelength {
-            config.elevation_wavelength_m = Meters(v);
             config.continent_wavelength_m = Meters(v);
         }
         if let Some(v) = self.continent_wavelength {
@@ -313,7 +346,7 @@ impl ConfigParams {
 
 fn load_config_file(path: &Path) -> Result<WorldGenConfig, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
+    WorldGenConfig::from_json(&text).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 fn build_config(cli: &Cli) -> Result<WorldGenConfig, String> {
@@ -369,7 +402,7 @@ fn generate_write_and_stats(
     stats_path: Option<&Path>,
 ) -> Result<(), String> {
     let start = Instant::now();
-    let map = generate_world(config);
+    let map = try_generate_world(config).map_err(|e| e.to_string())?;
     let elapsed = start.elapsed().as_millis() as u64;
 
     write_map_with_tiff_layers(&map, output, format, *tiff_layers)
@@ -403,17 +436,23 @@ fn run_batch(
         .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     let manifest: BatchManifest = serde_json::from_str(&text)
         .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+    manifest
+        .check_unknown_fields()
+        .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
 
     fs::create_dir_all(out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
     let mut base = WorldGenConfig::default();
-    manifest.base.apply_to(&mut base)?;
+    manifest.base.params.apply_to(&mut base)?;
 
     for variant in &manifest.variants {
         let mut config = base.clone();
-        let sample = variant.patch.sample || manifest.base.sample;
-        let sample_seed = variant.patch.sample_seed.or(manifest.base.sample_seed);
-        let had_seed = variant.patch.seed.is_some() || manifest.base.seed.is_some();
+        let sample = variant.patch.sample || manifest.base.params.sample;
+        let sample_seed = variant
+            .patch
+            .sample_seed
+            .or(manifest.base.params.sample_seed);
+        let had_seed = variant.patch.seed.is_some() || manifest.base.params.seed.is_some();
         variant.patch.apply_to(&mut config)?;
 
         if sample {

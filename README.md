@@ -28,9 +28,12 @@ Generation-only use does **not** require `--features gui`.
 
 **Entry points**
 
-- `generate_world(&WorldGenConfig)` — synchronous generation
+- `generate_world(&WorldGenConfig)` — synchronous generation; panics on an unsupported generator version or empty grid
+- `try_generate_world(&WorldGenConfig)` — validates first and returns `ConfigError` on bad input
 - `generate_world_with_progress(config, progress)` — optional per-stage progress for large maps
-- `WorldGenConfig::default()` or `serde_json` deserialize — load JSON presets
+- `WorldGenConfig::from_json(text)` — strict preset loading that rejects unknown fields and invalid values
+- `WorldGenConfig::default()` or `serde_json` deserialize — lenient loading for saved configs
+- `config.rescaled_to_cell_size(Meters(m))` — change the cell size and scale length-related parameters so the map stays the same
 - `sample_default_config(sample_seed, map_seed)` — optional parameter exploration from built-in priors
 
 **`WorldMap` output**
@@ -39,9 +42,13 @@ Generation-only use does **not** require `--features gui`.
 |-------|----------------|-------|
 | `elevation`, `temperature`, `rainfall` | `[0, 1]` | Normalized simulation units |
 | `water_mask` | `bool` | Land vs water |
-| `dist_to_water` | `u32` | Chamfer distance to nearest water |
+| `dist_to_water` | `u32` | Manhattan distance in cells to the nearest below-sea-level cell |
 | `ridge_influence` | `[0, 1]` | Mountain-belt signal from elevation stage |
 | `biome` | `Biome` | Final classification per cell |
+| `generator_version` | `u32` | Algorithm that produced the map |
+| `cell_size_m`, `ocean_floor_m`, `max_elevation_m`, `sea_level_m` | `f64` | Physical scale |
+
+Use `map.elevation_m(idx)`, `map.width_m()`, and `map.height_m()` for values in meters.
 
 Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. Within 1.x, IDs are fixed:
 
@@ -63,6 +70,8 @@ Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. W
 
 - `WorldGenConfig` JSON field names are the preset contract; major version bumps may require preset migration.
 - The public API surface is `generate_world`, `WorldGenConfig`, `WorldMap`, export helpers in `preview`, and optional sampling in `priors`.
+- `generator_version` identifies the algorithm a config regenerates with. Configs saved without it are version 1. Golden-map tests in `tests/golden_maps.rs` fail if version 1 output changes.
+- `elevation_wavelength_m` is deprecated. Use `continent_wavelength_m`; the old field applies only when that value is zero or negative.
 
 ```rust
 use terraforge::{WorldGenConfig, generate_world, sample_default_config};
@@ -85,6 +94,8 @@ cargo run --release --features gui --bin mapgui   # faster generation
 
 The app auto-generates on startup (default 512×512). Use **Generate** after changing parameters, or **Sample & generate** to draw numerical parameters from built-in priors and randomize the map seed. Load/save presets as JSON; export always writes the biome PNG.
 
+To change physical scale without changing the map, enter a value under **Rescale to cell size** in the Grid section and click **Apply**. Editing **Cell size** directly changes only that value, which changes the map.
+
 ## Headless map preview (`mapgen` CLI)
 
 ```bash
@@ -97,10 +108,9 @@ cargo run --bin mapgen -- --batch mapgen_presets/sample_batch.json --out-dir out
 cargo run --bin mapgen -- --batch mapgen_presets/example_batch.json --out-dir out/ --format tiff --stats
 ```
 
-`--sample` draws enabled parameters from built-in priors centered on the tuned defaults (Earth-like ranges for climate, relief, and land fraction). Without `--seed`, a random map seed is chosen. Use `--sample-seed` to reproduce the parameter draw.
+`--sample` draws enabled parameters from built-in priors centered on the tuned defaults (Earth-like ranges for climate, relief, and land fraction). Horizontal ranges scale with `cell_size_m`. Without `--seed`, a random map seed is chosen. Use `--sample-seed` to reproduce the parameter draw.
 
-Full CLI flags: `cargo run --bin mapgen -- --help` (includes `--config` for JSON preset merge).
-
+Full CLI flags: `cargo run --bin mapgen -- --help` (includes `--config` for JSON preset merge). Config files and batch manifests are checked strictly, so misspelled fields are errors.
 Multi-page TIFF output (use `--format tiff` or a `.tiff`/`.tif` extension). By default six pages are written:
 
 | Page | Layer | Encoding |

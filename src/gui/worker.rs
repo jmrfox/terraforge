@@ -24,6 +24,10 @@ pub fn spawn_generation(config: WorldGenConfig) -> GenJob {
     let progress_clone = progress.clone();
 
     thread::spawn(move || {
+        if let Err(e) = config.validate() {
+            let _ = tx.send(Err(e.to_string()));
+            return;
+        }
         let start = Instant::now();
         let map = generate_world_with_progress(&config, Some(progress_clone));
         let elapsed_ms = start.elapsed().as_millis() as u64;

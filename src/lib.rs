@@ -18,7 +18,8 @@ mod world;
 
 pub use colors::{biome_rgba, LEGEND_ENTRIES};
 pub use config::{
-    calibrate_sea_level_norm, ElevationEnvelopeConfig, ResolvedSimParams, WorldGenConfig,
+    calibrate_sea_level_norm, ConfigError, ElevationEnvelopeConfig, ResolvedSimParams,
+    WorldGenConfig, GENERATOR_VERSION,
 };
 pub use preview::{
     biome_to_id, compute_map_stats, floats_to_gray16, map_biome_id_to_gray16,
@@ -28,6 +29,7 @@ pub use preview::{
 };
 pub use priors::{
     sample_default_config, sample_parameters, PriorDist, PriorSet, SampleParam, SampleableParam,
+    REFERENCE_CELL_SIZE_M,
 };
 pub use progress::{new_progress_handle, GenProgressReport, ProgressHandle};
 pub use units::{Celsius, Degrees, Meters, SquareKilometers, SquareMeters};
@@ -36,17 +38,42 @@ pub use world::{Biome, WorldMap};
 use progress::report;
 
 /// Generate a complete world map from configuration.
+///
+/// # Panics
+///
+/// Panics if `config.generator_version` is unsupported or the grid is empty. Use
+/// [`try_generate_world`] to handle invalid configs as errors.
 pub fn generate_world(config: &WorldGenConfig) -> WorldMap {
     generate_world_with_progress(config, None)
 }
 
+/// Validate `config`, then generate its world map.
+pub fn try_generate_world(config: &WorldGenConfig) -> Result<WorldMap, ConfigError> {
+    config.validate()?;
+    Ok(generate_world(config))
+}
+
 /// Generate a world map, optionally reporting per-stage progress to a shared handle.
+///
+/// # Panics
+///
+/// Panics under the same conditions as [`generate_world`].
 pub fn generate_world_with_progress(
     config: &WorldGenConfig,
     progress: Option<ProgressHandle>,
 ) -> WorldMap {
+    // Never regenerate a saved map with a different algorithm than the one it names.
+    assert_eq!(
+        config.generator_version, GENERATOR_VERSION,
+        "unsupported generator_version"
+    );
+    assert!(
+        config.width > 0 && config.height > 0,
+        "map width and height must be at least 1"
+    );
+
     let params = config.resolve();
-    let mut map = WorldMap::new(config.width, config.height, config.seed);
+    let mut map = WorldMap::from_config(config);
 
     report(&progress, 0.0, "Generating elevation");
     elevation::generate_elevation(&mut map, config, &params, &progress, 0.0, 0.30);
@@ -213,6 +240,38 @@ mod tests {
         let map = generate_world(&config);
         let hist = map.biome_histogram();
         assert!(hist.len() >= 3, "expected multiple biomes, got {hist:?}");
+    }
+
+    #[test]
+    fn rescaling_cell_size_reproduces_the_map() {
+        for (seed, cell_size_m) in [(42, 400.0), (7, 40.0), (99, 1000.0)] {
+            let base = WorldGenConfig::test_config(seed, 128);
+            let rescaled = base.rescaled_to_cell_size(Meters(cell_size_m));
+            let (a, b) = (generate_world(&base), generate_world(&rescaled));
+            assert_eq!(a.elevation, b.elevation);
+            assert_eq!(a.temperature, b.temperature);
+            assert_eq!(a.rainfall, b.rainfall);
+            assert_eq!(a.biome, b.biome);
+            assert_eq!(b.cell_size_m, cell_size_m);
+        }
+    }
+
+    #[test]
+    fn try_generate_world_reports_invalid_config() {
+        let config = WorldGenConfig {
+            width: 0,
+            ..WorldGenConfig::default()
+        };
+        assert!(try_generate_world(&config).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported generator_version")]
+    fn unsupported_generator_version_never_generates() {
+        generate_world(&WorldGenConfig {
+            generator_version: GENERATOR_VERSION + 1,
+            ..WorldGenConfig::test_config(1, 16)
+        });
     }
 
     #[test]

@@ -10,6 +10,7 @@ use super::params::draw_params;
 use super::preview::{upload_map_texture, MapTexture};
 use super::sampling::draw_sampling;
 use super::worker::{poll_progress, spawn_generation, GenJob, GenResult};
+use super::zoom::anchored_scroll_offset;
 
 const MAP_ZOOM_MIN: f32 = 0.25;
 const MAP_ZOOM_MAX: f32 = 16.0;
@@ -23,12 +24,16 @@ enum GenState {
 
 pub struct MapGuiApp {
     config: WorldGenConfig,
+    rescale_cell_size_m: f64,
     prior_set: PriorSet,
     calibrate_land_target: f32,
     gen_state: GenState,
     layer: PreviewLayer,
     texture: Option<MapTexture>,
     map_zoom: f32,
+    /// Zoom used for the last drawn frame, to detect changes from any zoom control.
+    drawn_map_zoom: f32,
+    map_scroll_offset: egui::Vec2,
     map_zoom_fit: bool,
     status_message: String,
     pending_load: Option<String>,
@@ -40,6 +45,7 @@ impl MapGuiApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config = WorldGenConfig::default();
         let mut app = Self {
+            rescale_cell_size_m: config.cell_size_m.0,
             config,
             prior_set: PriorSet::default_priors(),
             calibrate_land_target: 0.30,
@@ -47,6 +53,8 @@ impl MapGuiApp {
             layer: PreviewLayer::Biomes,
             texture: None,
             map_zoom: 1.0,
+            drawn_map_zoom: 1.0,
+            map_scroll_offset: egui::Vec2::ZERO,
             map_zoom_fit: false,
             status_message: "Generating initial map…".into(),
             pending_load: None,
@@ -207,18 +215,19 @@ impl MapGuiApp {
         }
 
         if let Some(text) = self.pending_load.take() {
-            match serde_json::from_str::<WorldGenConfig>(&text) {
+            match WorldGenConfig::from_json(&text) {
                 Ok(loaded) => {
+                    self.rescale_cell_size_m = loaded.cell_size_m.0;
                     self.config = loaded;
                     self.status_message = "Preset loaded".into();
                 }
-                Err(e) => self.status_message = format!("Invalid preset: {e}"),
+                Err(e) => self.status_message = format!("Preset not loaded: {e}"),
             }
         }
     }
 
     fn draw_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .button("Generate")
                 .on_hover_text("Start generation; replaces any in-progress run")
@@ -303,40 +312,65 @@ impl MapGuiApp {
     }
 
     fn draw_preview_image(&mut self, ui: &mut egui::Ui) {
-        let panel_rect = ui.max_rect();
-        let (wheel, pointer_over_map, ctrl_held) = ui.input(|i| {
+        let view = ui.available_rect_before_wrap();
+        let (wheel, pointer_in_view, ctrl_held) = ui.input(|i| {
             (
                 i.smooth_scroll_delta.y,
-                i.pointer
-                    .hover_pos()
-                    .is_some_and(|pos| panel_rect.contains(pos)),
+                i.pointer.hover_pos().filter(|pos| view.contains(*pos)),
                 i.modifiers.ctrl,
             )
         });
-        let zooming = wheel != 0.0 && (pointer_over_map || ctrl_held);
+        let zooming = wheel != 0.0 && (pointer_in_view.is_some() || ctrl_held);
         if zooming {
             self.apply_zoom_scroll(wheel);
         }
 
-        if let Some(tex) = &self.texture {
-            if self.map_zoom_fit {
-                let avail = ui.available_size();
-                self.map_zoom = Self::clamp_map_zoom(
-                    (avail.x / tex.width as f32).min(avail.y / tex.height as f32),
-                );
-                self.map_zoom_fit = false;
-            }
-
-            let size = egui::vec2(tex.width as f32, tex.height as f32) * self.map_zoom;
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .enable_scrolling(!zooming)
-                .show(ui, |ui| {
-                    ui.image((tex.handle.id(), size));
-                });
-        } else {
+        let Some(tex) = &self.texture else {
             ui.label("No map yet — click Generate.");
+            return;
+        };
+        let texture_id = tex.handle.id();
+        let image_size = egui::vec2(tex.width as f32, tex.height as f32);
+
+        if self.map_zoom_fit {
+            self.map_zoom = Self::clamp_map_zoom(
+                (view.width() / image_size.x).min(view.height() / image_size.y),
+            );
+            self.map_zoom_fit = false;
         }
+
+        let mut scroll_area = egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .enable_scrolling(!zooming);
+        if self.map_zoom != self.drawn_map_zoom {
+            // Wheel zoom holds the cursor's map point still; toolbar zoom holds the center.
+            let anchor = pointer_in_view.unwrap_or(view.center()) - view.min;
+            let axis_offset = |axis: usize| {
+                anchored_scroll_offset(
+                    self.map_scroll_offset[axis],
+                    anchor[axis],
+                    view.size()[axis],
+                    image_size[axis],
+                    self.drawn_map_zoom,
+                    self.map_zoom,
+                )
+            };
+            scroll_area = scroll_area.scroll_offset(egui::vec2(axis_offset(0), axis_offset(1)));
+        }
+
+        let size = image_size * self.map_zoom;
+        let output = scroll_area.show(ui, |ui| {
+            let (content, _) = ui.allocate_exact_size(size.max(view.size()), egui::Sense::hover());
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            ui.painter().image(
+                texture_id,
+                egui::Rect::from_center_size(content.center(), size),
+                uv,
+                egui::Color32::WHITE,
+            );
+        });
+        self.map_scroll_offset = output.state.offset;
+        self.drawn_map_zoom = self.map_zoom;
     }
 
     fn draw_legend(&self, ui: &mut egui::Ui) {
@@ -425,7 +459,7 @@ impl eframe::App for MapGuiApp {
         egui::SidePanel::left("params_panel")
             .resizable(true)
             .default_width(340.0)
-            .min_width(280.0)
+            .min_width(180.0)
             .show(ctx, |ui| {
                 self.draw_toolbar(ui);
                 ui.separator();
@@ -438,7 +472,7 @@ impl eframe::App for MapGuiApp {
                                 draw_sampling(ui, &mut self.prior_set);
                             });
                         ui.separator();
-                        draw_params(ui, &mut self.config);
+                        draw_params(ui, &mut self.config, &mut self.rescale_cell_size_m);
                     });
             });
 

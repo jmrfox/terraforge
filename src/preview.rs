@@ -314,11 +314,11 @@ pub fn bools_to_gray8(values: &[bool]) -> Vec<u8> {
 }
 
 fn rgba8_to_rgb8(rgba: &[u8]) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
-        rgb.extend_from_slice(&px[..3]);
-    }
-    rgb
+    rgba.iter()
+        .enumerate()
+        .filter(|(channel, _)| channel % 4 != 3)
+        .map(|(_, &value)| value)
+        .collect()
 }
 
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {

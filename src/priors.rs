@@ -7,6 +7,18 @@ use rand_chacha::ChaCha8Rng;
 use crate::config::WorldGenConfig;
 use crate::units::{Meters, SquareMeters};
 
+/// Cell size at which the built-in horizontal priors are expressed.
+pub const REFERENCE_CELL_SIZE_M: f64 = 20.0;
+
+fn horizontal_scale(config: &WorldGenConfig) -> f64 {
+    let scale = config.cell_size_m.0 / REFERENCE_CELL_SIZE_M;
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
 /// Identifies a single sampleable numerical config field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SampleParam {
@@ -111,16 +123,24 @@ impl PriorSet {
         self.params.iter().filter(|p| p.enabled).count()
     }
 
+    fn is_enabled(&self, id: SampleParam) -> bool {
+        self.params.iter().any(|p| p.id == id && p.enabled)
+    }
+
     /// Sample enabled parameters into `config`. Grid fields (seed, width, height, cell size)
-    /// and enums are left unchanged.
+    /// and enums are left unchanged, as are parameters whose prior is disabled.
+    ///
+    /// Horizontal priors are defined at [`REFERENCE_CELL_SIZE_M`] and scale with
+    /// `config.cell_size_m`, so sampled features span the same number of cells.
     pub fn sample_into<R: Rng + ?Sized>(&self, config: &mut WorldGenConfig, rng: &mut R) {
+        let scale = horizontal_scale(config);
         for param in &self.params {
             if !param.enabled {
                 continue;
             }
-            apply_sample(config, param.id, param.dist.sample_f64(rng));
+            apply_sample(config, param.id, param.dist.sample_f64(rng), scale);
         }
-        constrain_sampled_config(config);
+        constrain_sampled_config(config, self, scale);
     }
 
     /// Return a copy of `base` with enabled parameters drawn from this prior set.
@@ -334,39 +354,64 @@ fn build_default_priors() -> Vec<SampleableParam> {
     ]
 }
 
-fn constrain_sampled_config(config: &mut WorldGenConfig) {
-    if config.ocean_floor_m.0 >= config.sea_level_m.0 - 100.0 {
+/// Keep sampled values plausible without touching parameters the user excluded.
+fn constrain_sampled_config(config: &mut WorldGenConfig, priors: &PriorSet, scale: f64) {
+    use SampleParam as P;
+    let on = |id| priors.is_enabled(id);
+
+    if (on(P::SeaLevelM) || on(P::OceanFloorM))
+        && config.ocean_floor_m.0 >= config.sea_level_m.0 - 100.0
+    {
         config.ocean_floor_m = Meters(config.sea_level_m.0 - 500.0);
     }
-    config.elevation_wavelength_m = Meters(config.elevation_wavelength_m.0.max(800.0));
-    config.continent_wavelength_m = config.elevation_wavelength_m;
-    if config.detail_wavelength_m.0 >= config.elevation_wavelength_m.0 {
-        config.detail_wavelength_m = Meters(config.elevation_wavelength_m.0 / 4.0);
+    if on(P::ElevationWavelengthM) {
+        config.continent_wavelength_m = Meters(config.continent_wavelength_m.0.max(800.0 * scale));
     }
-    config.detail_wavelength_m = Meters(config.detail_wavelength_m.0.max(200.0));
-    config.rainfall_scale = config.rainfall_scale.clamp(0.5, 1.25);
-    config.edge_ocean_bias = config.edge_ocean_bias.clamp(0.0, 0.25);
-    config.elevation_ridge_weight = config.elevation_ridge_weight.clamp(0.08, 0.35);
-    config.continentality_strength = config.continentality_strength.clamp(0.02, 0.18);
-    config.interior_drying_factor = config.interior_drying_factor.clamp(0.05, 0.28);
-    config.orographic_elevation_weight = config.orographic_elevation_weight.clamp(0.25, 0.70);
-    config.mountain_min_ridge_influence = config.mountain_min_ridge_influence.clamp(0.03, 0.12);
-    if let Some(ref mut land) = config.target_land_fraction {
-        *land = land.clamp(0.22, 0.48);
+    if on(P::ElevationWavelengthM) || on(P::DetailWavelengthM) {
+        let continent = config.effective_continent_wavelength_m().0;
+        if config.detail_wavelength_m.0 >= continent {
+            config.detail_wavelength_m = Meters(continent / 4.0);
+        }
+        config.detail_wavelength_m = Meters(config.detail_wavelength_m.0.max(200.0 * scale));
+    }
+    if on(P::RainfallScale) {
+        config.rainfall_scale = config.rainfall_scale.clamp(0.5, 1.25);
+    }
+    if on(P::EdgeOceanBias) {
+        config.edge_ocean_bias = config.edge_ocean_bias.clamp(0.0, 0.25);
+    }
+    if on(P::ElevationRidgeWeight) {
+        config.elevation_ridge_weight = config.elevation_ridge_weight.clamp(0.08, 0.35);
+    }
+    if on(P::ContinentalityStrength) {
+        config.continentality_strength = config.continentality_strength.clamp(0.02, 0.18);
+    }
+    if on(P::InteriorDryingFactor) {
+        config.interior_drying_factor = config.interior_drying_factor.clamp(0.05, 0.28);
+    }
+    if on(P::OrographicElevationWeight) {
+        config.orographic_elevation_weight = config.orographic_elevation_weight.clamp(0.25, 0.70);
+    }
+    if on(P::MountainMinRidgeInfluence) {
+        config.mountain_min_ridge_influence = config.mountain_min_ridge_influence.clamp(0.03, 0.12);
+    }
+    if on(P::TargetLandFraction) {
+        if let Some(ref mut land) = config.target_land_fraction {
+            *land = land.clamp(0.22, 0.48);
+        }
     }
 }
 
-fn apply_sample(config: &mut WorldGenConfig, id: SampleParam, value: f64) {
+fn apply_sample(config: &mut WorldGenConfig, id: SampleParam, value: f64, scale: f64) {
     match id {
         SampleParam::MaxElevationM => config.max_elevation_m = Meters(value.max(500.0)),
         SampleParam::SeaLevelM => config.sea_level_m = Meters(value),
         SampleParam::OceanFloorM => config.ocean_floor_m = Meters(value),
         SampleParam::ElevationWavelengthM => {
-            config.elevation_wavelength_m = Meters(value.max(100.0));
-            config.continent_wavelength_m = config.elevation_wavelength_m;
+            config.continent_wavelength_m = Meters((value * scale).max(100.0 * scale));
         }
         SampleParam::DetailWavelengthM => {
-            config.detail_wavelength_m = Meters(value.max(100.0));
+            config.detail_wavelength_m = Meters((value * scale).max(100.0 * scale));
         }
         SampleParam::ElevationOctaves => {
             config.elevation_octaves = value.round().clamp(1.0, 12.0) as u32
@@ -379,12 +424,14 @@ fn apply_sample(config: &mut WorldGenConfig, id: SampleParam, value: f64) {
             config.target_land_fraction = Some(value as f32);
         }
         SampleParam::EdgeOceanBias => config.edge_ocean_bias = value as f32,
-        SampleParam::MinLakeAreaM2 => config.min_lake_area_m2 = SquareMeters(value.max(1.0)),
+        SampleParam::MinLakeAreaM2 => {
+            config.min_lake_area_m2 = SquareMeters((value * scale * scale).max(1.0));
+        }
         SampleParam::TemperatureRangeC => config.temperature_range_c = value.clamp(10.0, 120.0),
         SampleParam::LapseRateCPerKm => config.lapse_rate_c_per_km = value.clamp(0.0, 20.0),
         SampleParam::RainfallScale => config.rainfall_scale = value as f32,
         SampleParam::TemperatureWavelengthM => {
-            config.temperature_wavelength_m = Meters(value.max(500.0))
+            config.temperature_wavelength_m = Meters((value * scale).max(500.0 * scale));
         }
         SampleParam::ContinentalityStrength => config.continentality_strength = value as f32,
         SampleParam::InteriorDryingFactor => config.interior_drying_factor = value as f32,
@@ -411,7 +458,7 @@ mod tests {
             SampleParam::MaxElevationM => config.max_elevation_m.0,
             SampleParam::SeaLevelM => config.sea_level_m.0,
             SampleParam::OceanFloorM => config.ocean_floor_m.0,
-            SampleParam::ElevationWavelengthM => config.elevation_wavelength_m.0,
+            SampleParam::ElevationWavelengthM => config.continent_wavelength_m.0,
             SampleParam::DetailWavelengthM => config.detail_wavelength_m.0,
             SampleParam::ElevationOctaves => config.elevation_octaves as f64,
             SampleParam::ElevationPersistence => config.elevation_persistence,
@@ -489,6 +536,54 @@ mod tests {
         assert_eq!(config.width, 256);
         assert_eq!(config.height, 128);
         assert_eq!(config.cell_size_m.0, 75.0);
+    }
+
+    #[test]
+    fn disabled_priors_leave_user_values_untouched() {
+        let mut priors = PriorSet::default_priors();
+        priors.disable_all();
+        let mut config = WorldGenConfig::default().rescaled_to_cell_size(Meters(400.0));
+        config.continent_wavelength_m = Meters(150_000.0);
+        config.rainfall_scale = 2.0;
+        config.target_land_fraction = Some(0.7);
+        let before = serde_json::to_value(&config).unwrap();
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        priors.sample_into(&mut config, &mut rng);
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+    }
+
+    #[test]
+    fn horizontal_priors_scale_with_cell_size() {
+        let priors = PriorSet::default_priors();
+        let base = WorldGenConfig::default();
+        let regional = WorldGenConfig::default().rescaled_to_cell_size(Meters(400.0));
+        let mut rng_a = ChaCha8Rng::seed_from_u64(11);
+        let mut rng_b = ChaCha8Rng::seed_from_u64(11);
+        for _ in 0..100 {
+            let a = priors.sample_config(&base, &mut rng_a);
+            let b = priors.sample_config(&regional, &mut rng_b);
+            for (at_20m, at_400m) in [
+                (a.continent_wavelength_m.0, b.continent_wavelength_m.0),
+                (a.detail_wavelength_m.0, b.detail_wavelength_m.0),
+                (a.temperature_wavelength_m.0, b.temperature_wavelength_m.0),
+            ] {
+                assert!((at_400m / at_20m - 20.0).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_configs_validate() {
+        let priors = PriorSet::default_priors();
+        let mut rng = ChaCha8Rng::seed_from_u64(5);
+        for base in [
+            WorldGenConfig::default(),
+            WorldGenConfig::default().rescaled_to_cell_size(Meters(400.0)),
+        ] {
+            for _ in 0..200 {
+                assert_eq!(priors.sample_config(&base, &mut rng).validate(), Ok(()));
+            }
+        }
     }
 
     #[test]

@@ -3,10 +3,10 @@ use terraforge::{ElevationEnvelopeConfig, Meters, SquareMeters, WorldGenConfig};
 
 const RESET_BTN: &str = "↺";
 
-pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
+pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig, rescale_cell_size_m: &mut f64) {
     let defaults = WorldGenConfig::default();
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Reset all to defaults").clicked() {
             *config = defaults.clone();
         }
@@ -51,6 +51,7 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
                 &mut config.cell_size_m,
                 defaults.cell_size_m,
             );
+            cell_size_rescale_control(ui, config, rescale_cell_size_m);
         });
 
     egui::CollapsingHeader::new("Vertical datum").show(ui, |ui| {
@@ -248,8 +249,8 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
             "Mountain min slope (°)",
             &mut config.mountain_min_slope_deg.0,
             defaults.mountain_min_slope_deg.0,
-            0.1,
-            Some(0.5..=45.0),
+            0.01,
+            Some(0.0..=45.0),
         );
         f32_field(
             ui,
@@ -260,6 +261,33 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig) {
             Some(0.0..=1.0),
         );
     });
+}
+
+/// Change the cell size and scale every length-related parameter to keep the same map.
+fn cell_size_rescale_control(ui: &mut Ui, config: &mut WorldGenConfig, target_m: &mut f64) {
+    ui.label("Rescale to cell size (m)");
+    ui.horizontal_wrapped(|ui| {
+        ui.add(
+            egui::DragValue::new(target_m)
+                .speed(1.0)
+                .range(0.01..=1_000_000.0),
+        );
+        let current = config.cell_size_m.0;
+        let can_apply = current.is_finite() && current > 0.0 && *target_m != current;
+        if ui
+            .add_enabled(can_apply, egui::Button::new("Apply"))
+            .on_hover_text(
+                "Set the cell size and scale wavelengths, ranges, lake area, and the mountain slope threshold so the map stays the same",
+            )
+            .clicked()
+        {
+            *config = config.rescaled_to_cell_size(Meters(*target_m));
+        }
+        if can_apply {
+            ui.weak(format!("×{:.3}", *target_m / current));
+        }
+    });
+    ui.add_space(4.0);
 }
 
 fn draw_envelope_config(

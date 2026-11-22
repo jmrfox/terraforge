@@ -28,22 +28,22 @@ Note: additive ridge composition differs from the older three-way weighted avera
 
 ### 2. Temperature (`temperature.rs`)
 
-- Base latitudinal gradient (poles cold, equator warm).
-- Elevation lapse cooling from resolved `elevation_cooling_factor`.
-- Low-amplitude spatial noise for variation.
+- Base temperature is a full-range FBM noise field. There is no latitude gradient.
+- Elevation lapse cooling from resolved `elevation_cooling_factor`. In generator 1 this is computed against `max_elevation_m` while elevation spans `ocean_floor_m..max_elevation_m`, so the default 6.5 °C/km applies as about 3.9 °C/km.
 - Output: `WorldMap.temperature` in `[0, 1]`.
 
 ### 3. Rainfall (`rainfall.rs`)
 
 - FBM noise field scaled by `rainfall_scale`.
-- Modulated by distance to water (coast proximity / continentality) and elevation (orographic boost).
-- Box-blurred for spatial coherence.
+- Modulated by distance to water (coast proximity / continentality).
+- Local rain shadow from the elevation drop versus the western neighbor on a box-blurred elevation field. The effect is very small in generator 1.
+- Water cells receive zero rainfall.
 - Output: `WorldMap.rainfall` in `[0, 1]`.
 
 ### 4. Water (`water.rs`)
 
 - Cells below `sea_level_norm` become water (`water_mask`).
-- Chamfer distance to nearest water cell (`dist_to_water`).
+- Manhattan distance in cells to the nearest water cell (`dist_to_water`), measured before small ponds are removed.
 - Edge-connected flood fill → ocean; enclosed depressions → lakes.
 - Small inland water bodies below `min_lake_area_m2` are removed.
 - Water cells get provisional `Biome::Ocean` or `Biome::Lake`.
@@ -67,10 +67,15 @@ Note: additive ridge composition differs from the older three-way weighted avera
 | `dist_to_water` | `Vec<u32>` | Stage 4 |
 | `biome` | `Vec<Biome>` | Stages 4–5 |
 | `width`, `height`, `seed` | metadata | construction |
+| `generator_version`, `cell_size_m`, `ocean_floor_m`, `max_elevation_m`, `sea_level_m` | metadata | construction |
 
 ## Export and analysis
 
 - **Preview / export:** `preview.rs` — RGB biome map, multi-page TIFF layers, JSON stats sidecar.
 - **Parameter sampling:** `priors.rs` — random parameter exploration from prior distributions (GUI, CLI `--sample`, library).
+
+## Generator versions
+
+`WorldGenConfig.generator_version` names the algorithm a config regenerates with, and a missing value means version 1. Any change that alters output for an existing config must add a new version and keep the old one reachable. `tests/golden_maps.rs` enforces this for version 1.
 
 See `README.md` for CLI usage and `cargo test` for pipeline invariants (determinism, value ranges, edge ocean connectivity).
