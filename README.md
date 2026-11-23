@@ -5,11 +5,11 @@ Deterministic procedural 2D world map generation for games and tools.
 Pipeline: **elevation → sea and coast → climate → hydrology → biomes**. Terrain is sampled in world meters, regional climate is modeled in °C and mm/year from latitude, elevation, and prevailing wind, and rainfall drains into rivers, lakes, and basins.
 
 <p align="center">
-  <img src="examples/1.png" width="256" alt="Example map 1" />
-  <img src="examples/2.png" width="256" alt="Example map 2" />
+  <img src="examples/1.png" width="256" alt="Temperate example map" />
+  <img src="examples/2.png" width="256" alt="Arid example map" />
   <br />
-  <img src="examples/3.png" width="256" alt="Example map 3" />
-  <img src="examples/4.png" width="256" alt="Example map 4" />
+  <img src="examples/3.png" width="256" alt="Cold example map" />
+  <img src="examples/4.png" width="256" alt="Tropical example map" />
 </p>
 
 Requires stable Rust. The GUI binary needs `--features gui`.
@@ -17,7 +17,7 @@ Requires stable Rust. The GUI binary needs `--features gui`.
 ## Install (Rust dependency)
 
 ```toml
-terraforge = { git = "https://github.com/jmrfox/terraforge", tag = "v1.0.0" }
+terraforge = { git = "https://github.com/jmrfox/terraforge", tag = "v2.0.0" }
 ```
 
 Pin a tag (or `rev = "<sha>"` during active development) so downstream builds stay reproducible.
@@ -59,7 +59,7 @@ Generation-only use does **not** require `--features gui`.
 
 Use `map.elevation_m(idx)`, `map.width_m()`, and `map.height_m()` for values in meters. Normalized temperature spans −15 to 35 °C. Normalized rainfall is `1 - exp(-mm / 1500)`, which stays close to `mm / 2000` below 1000 mm and does not saturate in wet climates.
 
-Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. Within 1.x, IDs are fixed:
+Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. Within 2.x, IDs are fixed:
 
 | ID | Biome |
 |----|-------|
@@ -77,7 +77,7 @@ Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. W
 
 **Stability**
 
-- The public API surface is `generate_world`, `WorldGenConfig`, `WorldMap`, map storage, export helpers in `preview`, and optional sampling in `priors`.
+- The public API is everything exported from the crate root, including `generate_world`, `WorldGenConfig`, `WorldMap`, `WorldControl`, map storage, export helpers, and optional parameter sampling.
 - The same config and seed produce the same map within a generator version. Generator changes may alter maps, so store maps you need to keep as `.tfmap` files.
 - `GENERATOR_VERSION` is recorded on each `WorldMap`. Golden-map tests in `tests/golden_maps.rs` detect unintended output changes.
 
