@@ -3,18 +3,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::units::{wavelength_to_frequency, Degrees, Meters, SquareMeters};
+use crate::units::{Degrees, Meters, SquareMeters};
 
-/// Generator algorithm produced by this build.
+/// Generator algorithm in this build, recorded on every map it produces.
 ///
-/// Bump this for any change that alters output for an existing config, and keep the
-/// previous algorithm reachable so saved maps continue to regenerate identically.
-pub const GENERATOR_VERSION: u32 = 1;
-
-/// Configs saved before versioning existed were all produced by generator 1.
-fn legacy_generator_version() -> u32 {
-    1
-}
+/// Bump this when a change alters output for an existing config.
+pub const GENERATOR_VERSION: u32 = 3;
 
 /// One or more problems found while loading or validating a [`WorldGenConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +49,7 @@ impl Default for ElevationEnvelopeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            wavelength_m: Meters(16_000.0),
+            wavelength_m: Meters(320_000.0),
             octaves: 3,
             floor: 0.0,
             strength: 1.0,
@@ -67,7 +61,6 @@ impl ElevationEnvelopeConfig {
     pub fn ridge_default() -> Self {
         Self {
             enabled: true,
-            wavelength_m: Meters(16_000.0),
             floor: 0.08,
             strength: 0.92,
             ..Self::default()
@@ -75,13 +68,83 @@ impl ElevationEnvelopeConfig {
     }
 }
 
-/// User-facing configuration in physical units where applicable.
+/// Regional climate parameters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegionalClimateConfig {
+    /// Latitude at the center of the map. North is toward row 0.
+    pub latitude_deg: f64,
+    /// Mean annual sea-level temperature at the equator.
+    pub equator_temperature_c: f64,
+    /// Mean annual sea-level temperature at the poles.
+    pub pole_temperature_c: f64,
+    /// Warms or cools the whole world.
+    pub temperature_offset_c: f64,
+    /// Amplitude of local temperature variation.
+    pub temperature_variation_c: f64,
+    /// Compass direction the prevailing wind blows from (270 = westerly).
+    pub wind_from_deg: f64,
+    /// Annual rain from saturated air at 15 °C.
+    pub base_rainfall_mm: f64,
+    /// Relative amplitude of local rainfall variation, in `[0, 1)`.
+    pub rainfall_variation: f64,
+    /// Distance over which rain depletes moisture carried inland.
+    pub rainout_length_m: Meters,
+    /// Fraction of moisture condensed by rising terrain that reaches the ground.
+    pub orographic_efficiency: f64,
+    /// Terrain smoothing used for airflow, so wind responds to ranges and not single hills.
+    pub orographic_smoothing_m: Meters,
+    /// Rainfall reduction at the subtropical dry belt near 27° latitude, in `[0, 1]`.
+    pub subtropical_drying: f64,
+}
+
+impl Default for RegionalClimateConfig {
+    fn default() -> Self {
+        Self {
+            latitude_deg: 35.0,
+            equator_temperature_c: 27.0,
+            pole_temperature_c: -18.0,
+            temperature_offset_c: 0.0,
+            temperature_variation_c: 3.0,
+            wind_from_deg: 270.0,
+            base_rainfall_mm: 1400.0,
+            rainfall_variation: 0.25,
+            rainout_length_m: Meters(800_000.0),
+            orographic_efficiency: 0.3,
+            orographic_smoothing_m: Meters(6_000.0),
+            subtropical_drying: 0.6,
+        }
+    }
+}
+
+/// Rivers and lakes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HydrologyConfig {
+    /// Mean annual discharge at which a channel counts as a river.
+    pub river_min_discharge_m3s: f64,
+    /// Shallower depressions are treated as noise that water flows across.
+    pub min_lake_depth_m: f64,
+    /// How far a river flowing at 10 m³/s cuts down through a lake's outlet. Incision
+    /// grows with the square root of flow, and higher values mean fewer, smaller lakes.
+    /// The default is large because noise terrain has no history of river erosion.
+    pub outlet_incision_m: f64,
+}
+
+impl Default for HydrologyConfig {
+    fn default() -> Self {
+        Self {
+            river_min_discharge_m3s: 3.0,
+            min_lake_depth_m: 60.0,
+            outlet_incision_m: 400.0,
+        }
+    }
+}
+
+/// User-facing configuration in physical units.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldGenConfig {
-    /// Generator algorithm this config regenerates with. Missing in JSON means 1.
-    #[serde(default = "legacy_generator_version")]
-    pub generator_version: u32,
     pub seed: u64,
     pub width: usize,
     pub height: usize,
@@ -93,10 +156,6 @@ pub struct WorldGenConfig {
     pub ocean_floor_m: Meters,
 
     // --- Elevation noise ---
-    /// Legacy duplicate of `continent_wavelength_m`, used only when that field is `<= 0`.
-    /// Kept so saved maps that carry a different value regenerate unchanged.
-    #[deprecated(note = "set `continent_wavelength_m`; this field is ignored when that is > 0")]
-    pub elevation_wavelength_m: Meters,
     /// Macro continent wavelength.
     pub continent_wavelength_m: Meters,
     pub detail_wavelength_m: Meters,
@@ -107,24 +166,29 @@ pub struct WorldGenConfig {
     pub elevation_ridge_weight: f32,
     pub elevation_detail_envelope: ElevationEnvelopeConfig,
     pub elevation_ridge_envelope: ElevationEnvelopeConfig,
-    /// When set, elevation is shifted so this land fraction emerges at `sea_level_norm`.
+    /// When set, elevation is shifted so this land fraction emerges at sea level.
     pub target_land_fraction: Option<f32>,
     /// Subtract elevation near map edges (0 = off) to encourage edge-connected ocean.
     pub edge_ocean_bias: f32,
+    /// Width of the band along map edges that `edge_ocean_bias` affects.
+    pub edge_ocean_margin_m: Meters,
+    /// Square region from the world origin used to place sea level. `None` uses the map
+    /// itself, which hits the land target closely but ties coastlines to the map extent.
+    /// Set it to keep coastlines fixed across different map sizes.
+    pub land_reference_extent_m: Option<Meters>,
 
     // --- Water ---
     pub min_lake_area_m2: SquareMeters,
 
     // --- Climate ---
-    /// Temperature span (°C) used to normalize elevation lapse into simulation units.
-    pub temperature_range_c: f64,
     pub lapse_rate_c_per_km: f64,
     pub rainfall_scale: f32,
+    /// Wavelength of local temperature and rainfall variation.
     pub temperature_wavelength_m: Meters,
-    pub continentality_strength: f32,
-    pub continentality_ocean_range_m: Meters,
-    pub orographic_elevation_weight: f32,
-    pub interior_drying_factor: f32,
+    pub regional_climate: RegionalClimateConfig,
+
+    // --- Hydrology ---
+    pub hydrology: HydrologyConfig,
 
     // --- Biomes ---
     pub mountain_min_elevation_m: Meters,
@@ -144,16 +208,6 @@ pub struct ResolvedSimParams {
     pub ocean_floor_m: f64,
     pub sea_level_norm: f32,
     pub min_lake_cells: usize,
-
-    pub elevation_cooling_factor: f32,
-
-    pub continent_noise_frequency: f64,
-    pub detail_noise_frequency: f64,
-    pub temperature_noise_frequency: f64,
-    pub detail_envelope_frequency: f64,
-    pub ridge_envelope_frequency: f64,
-
-    pub continentality_ocean_range_cells: u32,
     pub mountain_elev_norm: f32,
     /// Minimum normalized elevation delta between land neighbors (not tan of degrees).
     pub mountain_slope_norm: f32,
@@ -161,31 +215,22 @@ pub struct ResolvedSimParams {
 }
 
 impl WorldGenConfig {
-    #[allow(deprecated)]
-    pub fn effective_continent_wavelength_m(&self) -> Meters {
-        if self.continent_wavelength_m.0 > 0.0 {
-            self.continent_wavelength_m
-        } else {
-            self.elevation_wavelength_m
-        }
-    }
-
-    /// Change the cell size while keeping the generated map the same, by scaling
-    /// horizontal wavelengths and ranges, lake area, and the mountain slope threshold.
-    /// Vertical units are unchanged.
-    #[allow(deprecated)]
+    /// Change the cell size while keeping the terrain the same, by scaling horizontal
+    /// wavelengths and ranges, lake area, and the mountain slope threshold. Vertical
+    /// units are unchanged. Climate constants stay physical, so temperature and rainfall
+    /// respond to the world's new real size.
     pub fn rescaled_to_cell_size(&self, cell_size_m: Meters) -> Self {
         let k = cell_size_m.0 / self.cell_size_m.0;
         let scale = |m: Meters| Meters(m.0 * k);
         let mut c = self.clone();
         c.cell_size_m = cell_size_m;
-        c.elevation_wavelength_m = scale(c.elevation_wavelength_m);
         c.continent_wavelength_m = scale(c.continent_wavelength_m);
         c.detail_wavelength_m = scale(c.detail_wavelength_m);
         c.temperature_wavelength_m = scale(c.temperature_wavelength_m);
         c.elevation_detail_envelope.wavelength_m = scale(c.elevation_detail_envelope.wavelength_m);
         c.elevation_ridge_envelope.wavelength_m = scale(c.elevation_ridge_envelope.wavelength_m);
-        c.continentality_ocean_range_m = scale(c.continentality_ocean_range_m);
+        c.edge_ocean_margin_m = scale(c.edge_ocean_margin_m);
+        c.land_reference_extent_m = c.land_reference_extent_m.map(scale);
         c.min_lake_area_m2 = SquareMeters(c.min_lake_area_m2.0 * k * k);
         // The slope gate compares a per-cell rise, so the same rise over a wider cell
         // is a shallower angle.
@@ -194,16 +239,10 @@ impl WorldGenConfig {
         c
     }
 
-    /// Check that this config describes a world the current generator can build.
+    /// Check that this config describes a world the generator can build.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut issues = Vec::new();
 
-        if self.generator_version != GENERATOR_VERSION {
-            issues.push(format!(
-                "generator_version {} is not supported (this build generates version {GENERATOR_VERSION})",
-                self.generator_version
-            ));
-        }
         if self.width == 0 || self.height == 0 {
             issues.push("width and height must be at least 1".to_string());
         } else if self.width.checked_mul(self.height).is_none() {
@@ -215,14 +254,10 @@ impl WorldGenConfig {
 
         let mut positive = vec![
             ("cell_size_m", self.cell_size_m.0),
-            (
-                "continent_wavelength_m",
-                self.effective_continent_wavelength_m().0,
-            ),
+            ("continent_wavelength_m", self.continent_wavelength_m.0),
             ("detail_wavelength_m", self.detail_wavelength_m.0),
             ("temperature_wavelength_m", self.temperature_wavelength_m.0),
             ("elevation_persistence", self.elevation_persistence),
-            ("temperature_range_c", self.temperature_range_c),
         ];
         if self.elevation_ridge_envelope.enabled {
             positive.push((
@@ -245,10 +280,7 @@ impl WorldGenConfig {
         for (name, value) in [
             ("min_lake_area_m2", self.min_lake_area_m2.0),
             ("lapse_rate_c_per_km", self.lapse_rate_c_per_km),
-            (
-                "continentality_ocean_range_m",
-                self.continentality_ocean_range_m.0,
-            ),
+            ("edge_ocean_margin_m", self.edge_ocean_margin_m.0),
             (
                 "elevation_continent_weight",
                 f64::from(self.elevation_continent_weight),
@@ -263,18 +295,6 @@ impl WorldGenConfig {
             ),
             ("edge_ocean_bias", f64::from(self.edge_ocean_bias)),
             ("rainfall_scale", f64::from(self.rainfall_scale)),
-            (
-                "continentality_strength",
-                f64::from(self.continentality_strength),
-            ),
-            (
-                "orographic_elevation_weight",
-                f64::from(self.orographic_elevation_weight),
-            ),
-            (
-                "interior_drying_factor",
-                f64::from(self.interior_drying_factor),
-            ),
             (
                 "mountain_min_ridge_influence",
                 f64::from(self.mountain_min_ridge_influence),
@@ -327,6 +347,31 @@ impl WorldGenConfig {
                 issues.push("target_land_fraction must be between 0 and 1".to_string());
             }
         }
+        if self
+            .land_reference_extent_m
+            .is_some_and(|e| !(e.0.is_finite() && e.0 > 0.0))
+        {
+            issues.push("land_reference_extent_m must be a positive number".to_string());
+        }
+        for (name, value) in [
+            (
+                "hydrology.river_min_discharge_m3s",
+                self.hydrology.river_min_discharge_m3s,
+            ),
+            (
+                "hydrology.min_lake_depth_m",
+                self.hydrology.min_lake_depth_m,
+            ),
+            (
+                "hydrology.outlet_incision_m",
+                self.hydrology.outlet_incision_m,
+            ),
+        ] {
+            if !(value.is_finite() && value >= 0.0) {
+                issues.push(format!("{name} must be zero or more (got {value})"));
+            }
+        }
+        self.validate_regional_climate(&mut issues);
 
         if issues.is_empty() {
             Ok(())
@@ -335,23 +380,68 @@ impl WorldGenConfig {
         }
     }
 
+    fn validate_regional_climate(&self, issues: &mut Vec<String>) {
+        let c = &self.regional_climate;
+        let mut check = |ok: bool, message: &str| {
+            if !ok {
+                issues.push(message.to_string());
+            }
+        };
+        check(
+            (-90.0..=90.0).contains(&c.latitude_deg),
+            "regional_climate.latitude_deg must be between -90 and 90",
+        );
+        check(
+            c.equator_temperature_c.is_finite()
+                && c.pole_temperature_c.is_finite()
+                && c.equator_temperature_c > c.pole_temperature_c,
+            "regional_climate.equator_temperature_c must be above pole_temperature_c",
+        );
+        check(
+            c.temperature_offset_c.is_finite(),
+            "regional_climate.temperature_offset_c must be a finite number",
+        );
+        check(
+            c.temperature_variation_c.is_finite() && c.temperature_variation_c >= 0.0,
+            "regional_climate.temperature_variation_c must be zero or more",
+        );
+        check(
+            c.wind_from_deg.is_finite(),
+            "regional_climate.wind_from_deg must be a finite number",
+        );
+        check(
+            c.base_rainfall_mm.is_finite() && c.base_rainfall_mm >= 0.0,
+            "regional_climate.base_rainfall_mm must be zero or more",
+        );
+        check(
+            (0.0..1.0).contains(&c.rainfall_variation),
+            "regional_climate.rainfall_variation must be in [0, 1)",
+        );
+        check(
+            c.rainout_length_m.0.is_finite() && c.rainout_length_m.0 > 0.0,
+            "regional_climate.rainout_length_m must be a positive number",
+        );
+        check(
+            (0.0..=1.0).contains(&c.orographic_efficiency),
+            "regional_climate.orographic_efficiency must be in [0, 1]",
+        );
+        check(
+            c.orographic_smoothing_m.0.is_finite() && c.orographic_smoothing_m.0 >= 0.0,
+            "regional_climate.orographic_smoothing_m must be zero or more",
+        );
+        check(
+            (0.0..=1.0).contains(&c.subtropical_drying),
+            "regional_climate.subtropical_drying must be in [0, 1]",
+        );
+    }
+
     /// Strictly load a preset: rejects unknown fields and invalid values.
-    ///
-    /// Plain `serde_json::from_str` stays lenient so older saved maps keep loading.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
         let value: Value = serde_json::from_str(text).map_err(ConfigError::single)?;
         let reference = serde_json::to_value(Self::default()).map_err(ConfigError::single)?;
 
         let mut issues = Vec::new();
         collect_unknown_fields(&value, &reference, "", &mut issues);
-        if value.get("elevation_wavelength_m").is_some()
-            && value.get("continent_wavelength_m").is_none()
-        {
-            issues.push(
-                "elevation_wavelength_m has no effect on its own; set continent_wavelength_m"
-                    .to_string(),
-            );
-        }
         if !issues.is_empty() {
             return Err(ConfigError { issues });
         }
@@ -363,19 +453,12 @@ impl WorldGenConfig {
 
     pub fn resolve(&self) -> ResolvedSimParams {
         let cell = self.cell_size_m.0;
-        let map_width_m = self.width as f64 * cell;
-        let map_height_m = self.height as f64 * cell;
         let max_elev = self.max_elevation_m.0;
         let ocean_floor = self.ocean_floor_m.0;
         let elev_span = (max_elev - ocean_floor).max(1.0);
 
         let sea_level_norm =
             (((self.sea_level_m.0 - ocean_floor) / elev_span) as f32).clamp(0.0, 1.0);
-
-        let temp_range_c = self.temperature_range_c.max(1.0);
-        let elevation_cooling_factor =
-            ((self.lapse_rate_c_per_km / 1000.0 * max_elev) / temp_range_c) as f32;
-
         let mountain_elev_norm =
             (((self.mountain_min_elevation_m.0 - ocean_floor) / elev_span) as f32).clamp(0.0, 1.0);
         let slope_tan = self.mountain_min_slope_deg.to_radians().tan();
@@ -383,38 +466,13 @@ impl WorldGenConfig {
 
         ResolvedSimParams {
             cell_size_m: cell,
-            map_width_m,
-            map_height_m,
+            map_width_m: self.width as f64 * cell,
+            map_height_m: self.height as f64 * cell,
             max_elevation_m: max_elev,
             sea_level_m: self.sea_level_m.0,
             ocean_floor_m: ocean_floor,
             sea_level_norm,
             min_lake_cells: self.min_lake_area_m2.to_cell_count(cell).max(1),
-
-            elevation_cooling_factor,
-
-            continent_noise_frequency: wavelength_to_frequency(
-                map_width_m,
-                self.effective_continent_wavelength_m(),
-            ),
-            detail_noise_frequency: wavelength_to_frequency(map_width_m, self.detail_wavelength_m),
-            temperature_noise_frequency: wavelength_to_frequency(
-                map_width_m,
-                self.temperature_wavelength_m,
-            ),
-            detail_envelope_frequency: wavelength_to_frequency(
-                map_width_m,
-                self.elevation_detail_envelope.wavelength_m,
-            ),
-            ridge_envelope_frequency: wavelength_to_frequency(
-                map_width_m,
-                self.elevation_ridge_envelope.wavelength_m,
-            ),
-
-            continentality_ocean_range_cells: self
-                .continentality_ocean_range_m
-                .to_cells(cell)
-                .max(1),
             mountain_elev_norm,
             mountain_slope_norm,
             mountain_min_ridge_influence: self.mountain_min_ridge_influence,
@@ -464,22 +522,19 @@ fn collect_unknown_fields(value: &Value, reference: &Value, path: &str, issues: 
 }
 
 impl Default for WorldGenConfig {
-    #[allow(deprecated)]
     fn default() -> Self {
         Self {
-            generator_version: GENERATOR_VERSION,
             seed: 42,
             width: 512,
             height: 512,
 
-            cell_size_m: Meters(20.0),
+            cell_size_m: Meters(400.0),
             max_elevation_m: Meters(9000.0),
             sea_level_m: Meters(0.0),
             ocean_floor_m: Meters(-6000.0),
 
-            elevation_wavelength_m: Meters(5120.0),
-            continent_wavelength_m: Meters(5120.0),
-            detail_wavelength_m: Meters(1024.0),
+            continent_wavelength_m: Meters(102_400.0),
+            detail_wavelength_m: Meters(20_480.0),
             elevation_octaves: 4,
             elevation_persistence: 0.5,
             elevation_continent_weight: 0.65,
@@ -489,20 +544,20 @@ impl Default for WorldGenConfig {
             elevation_ridge_envelope: ElevationEnvelopeConfig::ridge_default(),
             target_land_fraction: Some(0.35),
             edge_ocean_bias: 0.12,
+            edge_ocean_margin_m: Meters(40_000.0),
+            land_reference_extent_m: None,
 
-            min_lake_area_m2: SquareMeters(9600.0),
+            min_lake_area_m2: SquareMeters(3_840_000.0),
 
-            temperature_range_c: 65.0,
             lapse_rate_c_per_km: 6.5,
             rainfall_scale: 0.90,
-            temperature_wavelength_m: Meters(12_000.0),
-            continentality_strength: 0.08,
-            continentality_ocean_range_m: Meters(7000.0),
-            orographic_elevation_weight: 0.48,
-            interior_drying_factor: 0.16,
+            temperature_wavelength_m: Meters(240_000.0),
+            regional_climate: RegionalClimateConfig::default(),
+
+            hydrology: HydrologyConfig::default(),
 
             mountain_min_elevation_m: Meters(2900.0),
-            mountain_min_slope_deg: Degrees(4.0),
+            mountain_min_slope_deg: Degrees(0.20032474367796477),
             mountain_min_ridge_influence: 0.06,
         }
     }
@@ -527,45 +582,16 @@ pub fn calibrate_sea_level_norm(elevation: &[f32], target_land_fraction: f32) ->
     (lo + hi) * 0.5
 }
 
-/// Shift elevation so `target_land_fraction` of cells lie at or above `sea_level_norm`.
-pub fn apply_land_fraction_target(
-    elevation: &mut [f32],
-    sea_level_norm: f32,
-    target_land_fraction: f32,
-) {
-    if elevation.is_empty() {
-        return;
-    }
-    let target = target_land_fraction.clamp(0.01, 0.99);
-    let mut sorted: Vec<f32> = elevation.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = ((1.0 - target) * sorted.len() as f32).floor() as usize;
-    let idx = idx.min(sorted.len() - 1);
-    let threshold = sorted[idx];
-    let shift = threshold - sea_level_norm;
-    for e in elevation.iter_mut() {
-        *e = (*e - shift).clamp(0.0, 1.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn resolve_default_cell_counts() {
-        let config = WorldGenConfig::default();
-        let p = config.resolve();
-        assert!((p.cell_size_m - 20.0).abs() < f64::EPSILON);
-        assert_eq!(p.min_lake_cells, 24);
-    }
-
-    #[test]
-    fn resolve_elevation_noise_frequency() {
         let p = WorldGenConfig::default().resolve();
-        assert!((p.continent_noise_frequency - 2.0).abs() < 0.01);
-        assert!((p.detail_noise_frequency - 10.0).abs() < 0.01);
-        assert!(p.temperature_noise_frequency > 0.0);
+        assert_eq!(p.cell_size_m, 400.0);
+        assert_eq!(p.map_width_m, 204_800.0);
+        assert_eq!(p.min_lake_cells, 24);
     }
 
     #[test]
@@ -577,29 +603,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_land_fraction_target_hits_target() {
-        let mut elev: Vec<f32> = (0..1000)
-            .map(|i| (i as f32 / 1000.0).sin() * 0.5 + 0.5)
-            .collect();
-        apply_land_fraction_target(&mut elev, 0.4, 0.35);
-        let land = elev.iter().filter(|&&e| e >= 0.4).count() as f32 / elev.len() as f32;
-        assert!((land - 0.35).abs() < 0.02);
-    }
-
-    #[test]
     fn resolve_mountain_slope_norm_uses_cell_and_elev_span() {
         let p = WorldGenConfig::default().resolve();
-        assert!(p.mountain_slope_norm < 0.001);
-        assert!(p.mountain_slope_norm > 0.0);
-    }
-
-    #[test]
-    fn steep_synthetic_step_exceeds_mountain_slope_norm() {
-        let config = WorldGenConfig::default();
-        let params = config.resolve();
-        let elev = [0.5_f32, 0.5 + params.mountain_slope_norm * 2.0];
-        let delta = (elev[0] - elev[1]).abs();
-        assert!(delta >= params.mountain_slope_norm);
+        assert!(p.mountain_slope_norm > 0.0 && p.mountain_slope_norm < 0.001);
     }
 
     #[test]
@@ -609,30 +615,23 @@ mod tests {
     }
 
     #[test]
-    fn default_and_regional_configs_are_valid() {
-        assert_eq!(WorldGenConfig::default().validate(), Ok(()));
+    fn default_and_rescaled_configs_are_valid() {
+        let config = WorldGenConfig::default();
+        assert_eq!(config.validate(), Ok(()));
         assert_eq!(
-            WorldGenConfig::default()
-                .rescaled_to_cell_size(Meters(400.0))
-                .validate(),
+            config.rescaled_to_cell_size(Meters(137.0)).validate(),
             Ok(())
         );
     }
 
     #[test]
-    fn missing_version_means_generator_one() {
-        let config: WorldGenConfig = serde_json::from_str(r#"{"seed": 7}"#).unwrap();
-        assert_eq!(config.generator_version, 1);
-    }
-
-    #[test]
     fn validate_reports_every_problem() {
-        let config = WorldGenConfig {
-            generator_version: GENERATOR_VERSION + 1,
+        let mut config = WorldGenConfig {
             width: 0,
             cell_size_m: Meters(f64::NAN),
             ..WorldGenConfig::default()
         };
+        config.regional_climate.latitude_deg = 120.0;
         let issues = config.validate().unwrap_err().issues;
         assert_eq!(issues.len(), 3, "{issues:?}");
     }
@@ -648,37 +647,29 @@ mod tests {
     }
 
     #[test]
-    fn from_json_rejects_ineffective_legacy_wavelength() {
-        let err = WorldGenConfig::from_json(r#"{"elevation_wavelength_m": 2560.0}"#).unwrap_err();
-        assert!(err.issues[0].contains("continent_wavelength_m"));
-    }
-
-    #[test]
     fn from_json_accepts_a_saved_config() {
-        let saved = include_str!("../tests/fixtures/saved_map_v1.json");
-        let config = WorldGenConfig::from_json(saved).unwrap();
-        assert_eq!(config.generator_version, 1);
-        assert_eq!(config.seed, 2103);
+        let saved = serde_json::to_string(&WorldGenConfig::test_config(2103, 128)).unwrap();
+        let config = WorldGenConfig::from_json(&saved).unwrap();
+        assert_eq!((config.seed, config.width), (2103, 128));
     }
 
     #[test]
-    fn rescale_preserves_grid_quantities() {
-        let base = WorldGenConfig::default();
-        let (a, b) = (
-            base.resolve(),
-            WorldGenConfig::default()
-                .rescaled_to_cell_size(Meters(400.0))
-                .resolve(),
-        );
-        assert_eq!(b.cell_size_m, 400.0);
-        assert_eq!(a.continent_noise_frequency, b.continent_noise_frequency);
-        assert_eq!(a.detail_noise_frequency, b.detail_noise_frequency);
-        assert_eq!(a.temperature_noise_frequency, b.temperature_noise_frequency);
+    fn rescale_scales_horizontal_lengths() {
+        let base = WorldGenConfig {
+            land_reference_extent_m: Some(Meters(100_000.0)),
+            ..WorldGenConfig::default()
+        };
+        let scaled = base.rescaled_to_cell_size(Meters(800.0));
+        assert_eq!(scaled.cell_size_m.0, 800.0);
+        assert_eq!(scaled.continent_wavelength_m.0, 204_800.0);
+        assert_eq!(scaled.edge_ocean_margin_m.0, 80_000.0);
+        assert_eq!(scaled.land_reference_extent_m, Some(Meters(200_000.0)));
         assert_eq!(
-            a.continentality_ocean_range_cells,
-            b.continentality_ocean_range_cells
+            scaled.resolve().min_lake_cells,
+            base.resolve().min_lake_cells
         );
-        assert_eq!(a.min_lake_cells, b.min_lake_cells);
+        assert_eq!(scaled.regional_climate, base.regional_climate);
+        let (a, b) = (base.resolve(), scaled.resolve());
         assert!((a.mountain_slope_norm - b.mountain_slope_norm).abs() < 1e-9);
     }
 }

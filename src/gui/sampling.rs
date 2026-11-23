@@ -2,7 +2,7 @@ use egui::Ui;
 use terraforge::PriorSet;
 
 pub fn draw_sampling(ui: &mut Ui, prior_set: &mut PriorSet) {
-    ui.label("Sample numerical parameters from Earth-like priors centered on tuned defaults. Grid size, cell size, seed, enums, and boolean toggles are not sampled. Horizontal ranges are shown for 20 m cells and scale with the current cell size.");
+    ui.label("Sample numerical parameters from Earth-like priors centered on tuned defaults. Grid size, cell size, seed, enums, and boolean toggles are not sampled. Horizontal ranges are shown for 400 m cells and scale with the current cell size.");
     ui.horizontal_wrapped(|ui| {
         if ui.button("Enable all").clicked() {
             prior_set.enable_all();

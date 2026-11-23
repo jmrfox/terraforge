@@ -1,8 +1,9 @@
+//! Biome classification from physical temperature and rainfall.
+
 use rayon::prelude::*;
 
-use super::config::{ResolvedSimParams, WorldGenConfig};
-use super::progress::{report_stage, ProgressHandle};
-use super::world::{Biome, WorldMap};
+use crate::config::ResolvedSimParams;
+use crate::world::{Biome, WorldMap};
 
 const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
@@ -33,92 +34,63 @@ fn interior_slope_at(
     max_delta
 }
 
-fn classify_land_biome(
-    temp: f32,
-    rain: f32,
-    elev: f32,
-    slope: f32,
-    ridge_influence: f32,
-    params: &ResolvedSimParams,
-) -> Biome {
-    if elev >= params.mountain_elev_norm
-        && slope >= params.mountain_slope_norm
-        && ridge_influence >= params.mountain_min_ridge_influence
-    {
-        return Biome::Mountain;
-    }
-
-    if temp < 0.12 {
-        return Biome::Ice;
-    }
-    if temp < 0.28 {
-        if rain < 0.35 {
-            return Biome::Tundra;
+/// Classification from mean annual °C and annual rainfall in mm.
+///
+/// Aridity uses the Köppen desert limit, which rises with temperature because warm air
+/// evaporates more water. That keeps the boundary continuous across temperature bands.
+fn classify_climate(temperature_c: f32, rainfall_mm: f32) -> Biome {
+    let desert_limit_mm = 10.0 * temperature_c.max(0.0) + 140.0;
+    if temperature_c < -10.0 {
+        Biome::Ice
+    } else if temperature_c < -4.0 {
+        Biome::Tundra
+    } else if temperature_c < 4.0 {
+        if rainfall_mm < desert_limit_mm {
+            Biome::Tundra
+        } else {
+            Biome::Taiga
         }
-        return Biome::Taiga;
-    }
-    if temp < 0.55 {
-        if rain < 0.24 {
-            return Biome::Desert;
+    } else if rainfall_mm < desert_limit_mm {
+        Biome::Desert
+    } else if temperature_c < 20.0 {
+        if rainfall_mm < 2.0 * desert_limit_mm {
+            Biome::Grassland
+        } else {
+            Biome::TemperateForest
         }
-        if rain < 0.55 {
-            return Biome::Grassland;
-        }
-        return Biome::TemperateForest;
+    } else if rainfall_mm < 1100.0 {
+        Biome::Savanna
+    } else {
+        Biome::TropicalForest
     }
-    if rain < 0.28 {
-        return Biome::Desert;
-    }
-    if rain < 0.50 {
-        return Biome::Savanna;
-    }
-    Biome::TropicalForest
 }
 
-/// Assign land biomes from temperature, rainfall, and elevation relief.
-pub fn generate_biomes(
-    map: &mut WorldMap,
-    _config: &WorldGenConfig,
-    params: &ResolvedSimParams,
-    progress: &Option<ProgressHandle>,
-    stage_start: f32,
-    stage_end: f32,
-) {
-    let w = map.width;
-    let h = map.height;
+pub fn generate(map: &mut WorldMap, params: &ResolvedSimParams) {
+    let (w, h) = (map.width, map.height);
     let elevation = map.elevation.as_slice();
-    let temperature = map.temperature.as_slice();
-    let rainfall = map.rainfall.as_slice();
     let water = map.water_mask.as_slice();
-    let ridge_influence = map.ridge_influence.as_slice();
+    let ridge = map.ridge_influence.as_slice();
+    let temperature = map.temperature_c.as_slice();
+    let rainfall = map.rainfall_mm.as_slice();
 
     map.biome
         .par_chunks_mut(w)
         .enumerate()
         .for_each(|(y, row)| {
-            if y % 8 == 0 {
-                report_stage(
-                    progress,
-                    stage_start,
-                    stage_end,
-                    y as f32 / h as f32,
-                    "Assigning biomes",
-                );
-            }
             for (x, cell) in row.iter_mut().enumerate() {
                 let idx = y * w + x;
                 if water[idx] {
                     continue;
                 }
-                let slope = interior_slope_at(w, h, elevation, water, x, y);
-                *cell = classify_land_biome(
-                    temperature[idx],
-                    rainfall[idx],
-                    elevation[idx],
-                    slope,
-                    ridge_influence[idx],
-                    params,
-                );
+                let is_mountain = elevation[idx] >= params.mountain_elev_norm
+                    && ridge[idx] >= params.mountain_min_ridge_influence
+                    && interior_slope_at(w, h, elevation, water, x, y)
+                        >= params.mountain_slope_norm;
+                *cell = if is_mountain {
+                    Biome::Mountain
+                } else {
+                    classify_climate(temperature[idx], rainfall[idx])
+                };
             }
         });
 }
@@ -126,42 +98,41 @@ pub fn generate_biomes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generate_world;
+    use crate::{generate_world, WorldGenConfig};
+
+    #[test]
+    fn classifies_familiar_climates() {
+        assert_eq!(classify_climate(-20.0, 200.0), Biome::Ice);
+        assert_eq!(classify_climate(-6.0, 300.0), Biome::Tundra);
+        assert_eq!(classify_climate(1.0, 500.0), Biome::Taiga);
+        assert_eq!(classify_climate(12.0, 150.0), Biome::Desert);
+        assert_eq!(classify_climate(12.0, 500.0), Biome::Grassland);
+        assert_eq!(classify_climate(12.0, 1200.0), Biome::TemperateForest);
+        assert_eq!(classify_climate(27.0, 100.0), Biome::Desert);
+        assert_eq!(classify_climate(27.0, 800.0), Biome::Savanna);
+        assert_eq!(classify_climate(27.0, 2200.0), Biome::TropicalForest);
+    }
 
     #[test]
     fn default_config_produces_mountains() {
-        let mut config = WorldGenConfig::default();
-        config.seed = 42;
-        config.width = 512;
-        config.height = 512;
-        let map = generate_world(&config);
+        let map = generate_world(&WorldGenConfig::default());
         let mountains = map
             .biome_histogram()
             .get(&Biome::Mountain)
             .copied()
             .unwrap_or(0);
-        assert!(
-            mountains > 0,
-            "expected Mountain biomes on default config, got {mountains}"
-        );
+        assert!(mountains > 0, "expected Mountain biomes on default config");
     }
 
     #[test]
     fn mountains_require_ridge_influence() {
-        let mut config = WorldGenConfig::default();
-        config.seed = 42;
-        config.width = 256;
-        config.height = 256;
-        config.mountain_min_ridge_influence = 1.0;
+        let config = WorldGenConfig {
+            width: 256,
+            height: 256,
+            mountain_min_ridge_influence: 1.0,
+            ..WorldGenConfig::default()
+        };
         let map = generate_world(&config);
-        let mountains = map
-            .biome_histogram()
-            .get(&Biome::Mountain)
-            .copied()
-            .unwrap_or(0);
-        assert_eq!(
-            mountains, 0,
-            "ridge threshold 1.0 should suppress all mountains"
-        );
+        assert!(!map.biome.contains(&Biome::Mountain));
     }
 }

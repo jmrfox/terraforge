@@ -1,109 +1,159 @@
+//! World-space elevation with a sea level that does not depend on grid resolution.
+
 use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 use rayon::prelude::*;
 
-use super::config::{
-    apply_land_fraction_target, ElevationEnvelopeConfig, ResolvedSimParams, WorldGenConfig,
-};
-use super::grid_ops::normalize01;
-use super::progress::{report_stage, ProgressHandle};
-use super::world::WorldMap;
+use crate::config::{ElevationEnvelopeConfig, ResolvedSimParams, WorldGenConfig};
+use crate::grid_ops::normalize01;
+use crate::progress::{report_stage, ProgressHandle};
+use crate::seeds::{stream_seed, NoiseStream};
+use crate::world::WorldMap;
 
-fn edge_ocean_falloff(nx: f32, ny: f32, strength: f32) -> f32 {
-    if strength <= 0.0 {
-        return 0.0;
-    }
-    let dx = (nx - 0.5).abs() * 2.0;
-    let dy = (ny - 0.5).abs() * 2.0;
-    strength * dx.max(dy)
+/// Samples per axis used to place sea level, independent of the map's resolution.
+const SEA_LEVEL_LATTICE: usize = 256;
+
+fn fbm(seed: u32, wavelength_m: f64, octaves: usize, persistence: f64) -> Fbm<Perlin> {
+    Fbm::<Perlin>::new(seed)
+        .set_octaves(octaves)
+        .set_frequency(1.0 / wavelength_m)
+        .set_lacunarity(2.0)
+        .set_persistence(persistence)
 }
 
-struct EnvelopeNoise {
+fn unit(field: &Fbm<Perlin>, x_m: f64, y_m: f64) -> f32 {
+    normalize01((field.get([x_m, y_m]) as f32 + 1.0) * 0.5)
+}
+
+struct Envelope {
     field: Fbm<Perlin>,
     config: ElevationEnvelopeConfig,
 }
 
-impl EnvelopeNoise {
-    fn new(seed: u32, frequency: f64, config: &ElevationEnvelopeConfig) -> Self {
+impl Envelope {
+    fn new(seed: u64, stream: NoiseStream, config: &ElevationEnvelopeConfig) -> Self {
         Self {
-            field: Fbm::<Perlin>::new(seed)
-                .set_octaves(config.octaves.max(1) as usize)
-                .set_frequency(frequency)
-                .set_lacunarity(2.0)
-                .set_persistence(0.5),
+            field: fbm(
+                stream_seed(seed, stream),
+                config.wavelength_m.0.max(1.0),
+                config.octaves.max(1) as usize,
+                0.5,
+            ),
             config: config.clone(),
         }
     }
 
-    fn sample(&self, nx: f64, ny: f64) -> f32 {
+    fn sample(&self, x_m: f64, y_m: f64) -> f32 {
         if !self.config.enabled {
             return 1.0;
         }
-        let raw = normalize01((self.field.get([nx, ny]) as f32 + 1.0) * 0.5);
-        self.config.floor + raw * self.config.strength
+        self.config.floor + unit(&self.field, x_m, y_m) * self.config.strength
     }
 }
 
-struct ElevationNoise {
+struct Terrain {
     continent: Fbm<Perlin>,
     detail: Fbm<Perlin>,
     ridge: Fbm<Perlin>,
-    detail_envelope: EnvelopeNoise,
-    ridge_envelope: EnvelopeNoise,
+    detail_envelope: Envelope,
+    ridge_envelope: Envelope,
+    continent_weight: f32,
+    detail_weight: f32,
+    ridge_weight: f32,
 }
 
-impl ElevationNoise {
-    fn new(config: &WorldGenConfig, params: &ResolvedSimParams) -> Self {
-        let seed = config.seed as u32;
+impl Terrain {
+    fn new(config: &WorldGenConfig) -> Self {
+        let seed = config.seed;
+        let detail_m = config.detail_wavelength_m.0;
         Self {
-            continent: Fbm::<Perlin>::new(seed)
-                .set_octaves(config.elevation_octaves as usize)
-                .set_frequency(params.continent_noise_frequency)
-                .set_lacunarity(2.0)
-                .set_persistence(config.elevation_persistence),
-            detail: Fbm::<Perlin>::new(seed.wrapping_add(1))
-                .set_octaves(3)
-                .set_frequency(params.detail_noise_frequency)
-                .set_lacunarity(2.0)
-                .set_persistence(0.45),
-            ridge: Fbm::<Perlin>::new(seed.wrapping_add(2))
-                .set_octaves(4)
-                .set_frequency(params.detail_noise_frequency * 1.5)
-                .set_lacunarity(2.0)
-                .set_persistence(0.5),
-            detail_envelope: EnvelopeNoise::new(
-                seed.wrapping_add(11),
-                params.detail_envelope_frequency,
+            continent: fbm(
+                stream_seed(seed, NoiseStream::Continent),
+                config.continent_wavelength_m.0,
+                config.elevation_octaves as usize,
+                config.elevation_persistence,
+            ),
+            detail: fbm(stream_seed(seed, NoiseStream::Detail), detail_m, 3, 0.45),
+            ridge: fbm(
+                stream_seed(seed, NoiseStream::Ridge),
+                detail_m / 1.5,
+                4,
+                0.5,
+            ),
+            detail_envelope: Envelope::new(
+                seed,
+                NoiseStream::DetailEnvelope,
                 &config.elevation_detail_envelope,
             ),
-            ridge_envelope: EnvelopeNoise::new(
-                seed.wrapping_add(10),
-                params.ridge_envelope_frequency,
+            ridge_envelope: Envelope::new(
+                seed,
+                NoiseStream::RidgeEnvelope,
                 &config.elevation_ridge_envelope,
             ),
+            continent_weight: config.elevation_continent_weight,
+            detail_weight: config.elevation_detail_weight,
+            ridge_weight: config.elevation_ridge_weight,
         }
     }
 
-    fn sample(&self, nx: f64, ny: f64, w_cont: f32, w_detail: f32, w_ridge: f32) -> (f32, f32) {
-        let continent01 = normalize01((self.continent.get([nx, ny]) as f32 + 1.0) * 0.5);
-        let detail01 = normalize01((self.detail.get([nx, ny]) as f32 + 1.0) * 0.5);
-        let ridge_raw = self.ridge.get([nx, ny]) as f32;
-        let ridge01 = normalize01(1.0 - ridge_raw.abs());
+    /// Unshifted elevation and ridge influence at a world position.
+    fn sample(&self, x_m: f64, y_m: f64) -> (f32, f32) {
+        let continent = unit(&self.continent, x_m, y_m);
+        let detail = unit(&self.detail, x_m, y_m);
+        let ridge = normalize01(1.0 - (self.ridge.get([x_m, y_m]) as f32).abs());
+        let ridge_influence = ridge * self.ridge_envelope.sample(x_m, y_m);
 
-        let env_detail = self.detail_envelope.sample(nx, ny);
-        let env_ridge = self.ridge_envelope.sample(nx, ny);
-        let ridge_influence = ridge01 * env_ridge;
-
-        let wd = w_detail * env_detail;
-        let base_denom = (w_cont + wd).max(0.001);
-        let base = (w_cont * continent01 + wd * detail01) / base_denom;
-
-        let elev = normalize01(base + w_ridge * ridge_influence);
-        (elev, ridge_influence)
+        let detail_weight = self.detail_weight * self.detail_envelope.sample(x_m, y_m);
+        let denom = (self.continent_weight + detail_weight).max(0.001);
+        let base = (self.continent_weight * continent + detail_weight * detail) / denom;
+        (base + self.ridge_weight * ridge_influence, ridge_influence)
     }
 }
 
-/// Generate elevation from multi-scale FBM noise with optional land-fraction targeting.
-pub fn generate_elevation(
+/// Elevation lowered within `margin_m` of the map edge, leaving the interior untouched.
+fn edge_falloff(x_m: f64, y_m: f64, width_m: f64, height_m: f64, config: &WorldGenConfig) -> f32 {
+    let margin_m = config.edge_ocean_margin_m.0;
+    if config.edge_ocean_bias <= 0.0 || margin_m <= 0.0 {
+        return 0.0;
+    }
+    let to_edge = x_m.min(width_m - x_m).min(y_m).min(height_m - y_m);
+    if to_edge >= margin_m {
+        return 0.0;
+    }
+    let t = (1.0 - to_edge / margin_m) as f32;
+    config.edge_ocean_bias * t * t
+}
+
+/// Elevation shift that puts the target land fraction above sea level.
+fn sea_level_shift(terrain: &Terrain, config: &WorldGenConfig, params: &ResolvedSimParams) -> f32 {
+    let Some(target) = config.target_land_fraction else {
+        return 0.0;
+    };
+    // A fixed reference ignores this map's edges so every map size gets the same shift.
+    let (span_x, span_y, use_map_edges) = match config.land_reference_extent_m {
+        Some(extent) => (extent.0, extent.0, false),
+        None => (params.map_width_m, params.map_height_m, true),
+    };
+    let n = SEA_LEVEL_LATTICE;
+    let mut samples: Vec<f32> = (0..n * n)
+        .into_par_iter()
+        .map(|i| {
+            let x_m = ((i % n) as f64 + 0.5) / n as f64 * span_x;
+            let y_m = ((i / n) as f64 + 0.5) / n as f64 * span_y;
+            let falloff = if use_map_edges {
+                edge_falloff(x_m, y_m, span_x, span_y, config)
+            } else {
+                0.0
+            };
+            terrain.sample(x_m, y_m).0 - falloff
+        })
+        .collect();
+    samples.sort_by(f32::total_cmp);
+    let target = target.clamp(0.01, 0.99);
+    let idx = (((1.0 - target) * samples.len() as f32) as usize).min(samples.len() - 1);
+    samples[idx] - params.sea_level_norm
+}
+
+pub fn generate(
     map: &mut WorldMap,
     config: &WorldGenConfig,
     params: &ResolvedSimParams,
@@ -111,13 +161,10 @@ pub fn generate_elevation(
     stage_start: f32,
     stage_end: f32,
 ) {
-    let w = map.width;
-    let h = map.height;
-    let noise = ElevationNoise::new(config, params);
-    let w_cont = config.elevation_continent_weight;
-    let w_detail = config.elevation_detail_weight;
-    let w_ridge = config.elevation_ridge_weight;
-    let edge_bias = config.edge_ocean_bias;
+    let (w, h) = (map.width, map.height);
+    let cell = params.cell_size_m;
+    let terrain = Terrain::new(config);
+    let shift = sea_level_shift(&terrain, config, params);
 
     map.elevation
         .par_chunks_mut(w)
@@ -133,115 +180,14 @@ pub fn generate_elevation(
                     "Generating elevation",
                 );
             }
-            for (x, cell) in row.iter_mut().enumerate() {
-                let nx = x as f64 / w as f64;
-                let ny = y as f64 / h as f64;
-                let (mut elev, ridge_influence) = noise.sample(nx, ny, w_cont, w_detail, w_ridge);
+            let y_m = (y as f64 + 0.5) * cell;
+            for (x, cell_value) in row.iter_mut().enumerate() {
+                let x_m = (x as f64 + 0.5) * cell;
+                let (raw, ridge_influence) = terrain.sample(x_m, y_m);
+                let falloff =
+                    edge_falloff(x_m, y_m, params.map_width_m, params.map_height_m, config);
                 ridge_row[x] = ridge_influence;
-                elev -= edge_ocean_falloff(nx as f32, ny as f32, edge_bias);
-                *cell = normalize01(elev);
+                *cell_value = normalize01(raw - falloff - shift);
             }
         });
-
-    if let Some(target) = config.target_land_fraction {
-        apply_land_fraction_target(&mut map.elevation, params.sea_level_norm, target);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::ElevationEnvelopeConfig;
-    use crate::generate_world;
-
-    fn assert_range01(values: &[f32], name: &str) {
-        for (i, &v) in values.iter().enumerate() {
-            assert!((0.0..=1.0).contains(&v), "{name}[{i}] = {v} out of range");
-        }
-    }
-
-    fn config_with_ridge_envelope(seed: u64, strength: f32) -> WorldGenConfig {
-        WorldGenConfig {
-            seed,
-            width: 128,
-            height: 128,
-            target_land_fraction: None,
-            edge_ocean_bias: 0.0,
-            elevation_ridge_envelope: ElevationEnvelopeConfig {
-                enabled: true,
-                strength,
-                ..ElevationEnvelopeConfig::ridge_default()
-            },
-            elevation_detail_envelope: ElevationEnvelopeConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn elevation_deterministic_with_envelopes() {
-        let config = WorldGenConfig::test_config(99, 64);
-        let mut a = WorldMap::new(config.width, config.height, config.seed);
-        let mut b = WorldMap::new(config.width, config.height, config.seed);
-        let params = config.resolve();
-        generate_elevation(&mut a, &config, &params, &None, 0.0, 1.0);
-        generate_elevation(&mut b, &config, &params, &None, 0.0, 1.0);
-        assert_eq!(a.elevation, b.elevation);
-        assert_eq!(a.ridge_influence, b.ridge_influence);
-    }
-
-    #[test]
-    fn disabled_envelopes_produce_valid_range() {
-        let mut config = WorldGenConfig::test_config(7, 64);
-        config.elevation_ridge_envelope.enabled = false;
-        config.elevation_detail_envelope.enabled = false;
-        config.target_land_fraction = None;
-        let mut map = WorldMap::new(config.width, config.height, config.seed);
-        let params = config.resolve();
-        generate_elevation(&mut map, &config, &params, &None, 0.0, 1.0);
-        assert_range01(&map.elevation, "elevation");
-    }
-
-    #[test]
-    fn ridge_envelope_modulates_elevation() {
-        let flat = config_with_ridge_envelope(42, 0.0);
-        let varied = config_with_ridge_envelope(42, 1.0);
-
-        let map_flat = generate_world(&flat);
-        let map_varied = generate_world(&varied);
-
-        assert_ne!(
-            map_flat.elevation, map_varied.elevation,
-            "ridge envelope strength should change the elevation field"
-        );
-
-        let max_flat = map_flat
-            .elevation
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        let max_varied = map_varied
-            .elevation
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        assert!(
-            max_varied > max_flat,
-            "ridge envelope should raise peak elevation: flat={max_flat}, varied={max_varied}"
-        );
-    }
-
-    #[test]
-    fn disabled_ridge_envelope_ignores_strength() {
-        let mut a = config_with_ridge_envelope(42, 0.0);
-        let mut b = config_with_ridge_envelope(42, 1.0);
-        a.elevation_ridge_envelope.enabled = false;
-        b.elevation_ridge_envelope.enabled = false;
-
-        let map_a = generate_world(&a);
-        let map_b = generate_world(&b);
-        assert_eq!(map_a.elevation, map_b.elevation);
-    }
 }

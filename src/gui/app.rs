@@ -3,7 +3,8 @@ use std::fs;
 use eframe::egui;
 use rand::Rng;
 use terraforge::{
-    biome_rgba, write_map_png, PreviewLayer, PriorSet, WorldGenConfig, WorldMap, LEGEND_ENTRIES,
+    biome_rgba, compute_map_stats, load_map_file, save_map_file, write_map_png, PreviewLayer,
+    PriorSet, StoredMap, WorldGenConfig, WorldMap, LEGEND_ENTRIES, MAP_FILE_EXTENSION,
 };
 
 use super::params::draw_params;
@@ -39,6 +40,8 @@ pub struct MapGuiApp {
     pending_load: Option<String>,
     pending_save_config: bool,
     pending_export_png: bool,
+    pending_save_map: bool,
+    pending_load_map: bool,
 }
 
 impl MapGuiApp {
@@ -60,6 +63,8 @@ impl MapGuiApp {
             pending_load: None,
             pending_save_config: false,
             pending_export_png: false,
+            pending_save_map: false,
+            pending_load_map: false,
         };
         app.start_generation();
         app
@@ -176,7 +181,63 @@ impl MapGuiApp {
         }
     }
 
-    fn handle_file_dialogs(&mut self) {
+    /// Store the displayed map with the config that actually generated it.
+    fn save_current_map(&mut self) {
+        let GenState::Done(gen) = &self.gen_state else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Terraforge map", &[MAP_FILE_EXTENSION])
+            .set_file_name(format!("map.{MAP_FILE_EXTENSION}"))
+            .save_file()
+        else {
+            return;
+        };
+        self.status_message = match save_map_file(&path, &gen.map, &gen.stats.config) {
+            Ok(()) => format!("Saved map to {}", path.display()),
+            Err(e) => format!("Save failed: {e}"),
+        };
+    }
+
+    fn load_stored_map(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Terraforge map", &[MAP_FILE_EXTENSION])
+            .pick_file()
+        else {
+            return;
+        };
+        match load_map_file(&path) {
+            Ok(stored) => {
+                self.show_stored_map(ctx, stored);
+                self.status_message = format!("Loaded map from {}", path.display());
+            }
+            Err(e) => self.status_message = format!("Load failed: {e}"),
+        }
+    }
+
+    /// Display a stored map, replacing any in-progress generation.
+    fn show_stored_map(&mut self, ctx: &egui::Context, stored: StoredMap) {
+        let stats = compute_map_stats(&stored.map, &stored.config, 0);
+        self.rescale_cell_size_m = stored.config.cell_size_m.0;
+        self.config = stored.config;
+        self.on_generation_complete(
+            ctx,
+            GenResult {
+                map: stored.map,
+                stats,
+                elapsed_ms: 0,
+            },
+        );
+    }
+
+    fn handle_file_dialogs(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.pending_save_map) {
+            self.save_current_map();
+        }
+        if std::mem::take(&mut self.pending_load_map) {
+            self.load_stored_map(ctx);
+        }
+
         if self.pending_save_config {
             self.pending_save_config = false;
             if let Some(path) = rfd::FileDialog::new()
@@ -267,6 +328,20 @@ impl MapGuiApp {
                 .clicked()
             {
                 self.pending_export_png = true;
+            }
+            if ui
+                .add_enabled(self.current_map().is_some(), egui::Button::new("Save map"))
+                .on_hover_text("Store the full generated map as a compressed .tfmap file")
+                .clicked()
+            {
+                self.pending_save_map = true;
+            }
+            if ui
+                .button("Load map")
+                .on_hover_text("Open a stored .tfmap map without regenerating it")
+                .clicked()
+            {
+                self.pending_load_map = true;
             }
         });
     }
@@ -454,7 +529,7 @@ impl MapGuiApp {
 impl eframe::App for MapGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_generation(ctx);
-        self.handle_file_dialogs();
+        self.handle_file_dialogs(ctx);
 
         egui::SidePanel::left("params_panel")
             .resizable(true)

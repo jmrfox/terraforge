@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::config::WorldGenConfig;
+use crate::config::{WorldGenConfig, GENERATOR_VERSION};
 
 /// Terrain / climate classification for a map cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,6 +17,19 @@ pub enum Biome {
     TropicalForest,
     Mountain,
 }
+
+/// Grid offsets for `WorldMap::flow_direction`: code `n + 1` flows along `FLOW_OFFSETS[n]`.
+/// Order is east, southeast, south, southwest, west, northwest, north, northeast.
+pub const FLOW_OFFSETS: [(i32, i32); 8] = [
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+];
 
 /// Flattened 2D world map produced by the generation pipeline.
 #[derive(Debug, Clone)]
@@ -38,13 +51,31 @@ pub struct WorldMap {
     pub elevation: Vec<f32>,
     /// Ridge noise × ridge envelope; populated during elevation generation.
     pub ridge_influence: Vec<f32>,
+    /// Temperature normalized from −15 to 35 °C.
     pub temperature: Vec<f32>,
+    /// Rainfall normalized from 0 to 2000 mm/year, and zero on water.
     pub rainfall: Vec<f32>,
+    /// Mean annual temperature in °C.
+    pub temperature_c: Vec<f32>,
+    /// Annual rainfall in mm, including over water.
+    pub rainfall_mm: Vec<f32>,
 
     pub water_mask: Vec<bool>,
-    /// Manhattan distance in cells to the nearest cell below sea level, measured before
-    /// small ponds are filled (populated during water classification).
+    /// Manhattan distance in cells to the nearest ocean or lake cell.
     pub dist_to_water: Vec<u32>,
+
+    /// Mean annual river discharge in m³/s. Zero on the ocean.
+    pub discharge_m3s: Vec<f32>,
+    /// Downstream direction: 0 for none, otherwise an index into [`FLOW_OFFSETS`] plus 1.
+    pub flow_direction: Vec<u8>,
+    /// Drainage basin of each cell. Zero on the ocean.
+    pub basin_id: Vec<u32>,
+    /// Land cells carrying a river.
+    pub river_mask: Vec<bool>,
+    /// Manhattan distance in cells to the nearest river, or `u32::MAX` if there are none.
+    pub dist_to_river: Vec<u32>,
+    /// Water surface in meters: sea level, lake level, or the terrain on dry land.
+    pub water_surface_m: Vec<f32>,
 
     pub biome: Vec<Biome>,
 }
@@ -58,7 +89,7 @@ impl WorldMap {
             width,
             height,
             seed,
-            generator_version: defaults.generator_version,
+            generator_version: GENERATOR_VERSION,
             cell_size_m: defaults.cell_size_m.0,
             ocean_floor_m: defaults.ocean_floor_m.0,
             max_elevation_m: defaults.max_elevation_m.0,
@@ -67,8 +98,16 @@ impl WorldMap {
             ridge_influence: vec![0.0; len],
             temperature: vec![0.0; len],
             rainfall: vec![0.0; len],
+            temperature_c: vec![0.0; len],
+            rainfall_mm: vec![0.0; len],
             water_mask: vec![false; len],
             dist_to_water: vec![u32::MAX; len],
+            discharge_m3s: vec![0.0; len],
+            flow_direction: vec![0; len],
+            basin_id: vec![0; len],
+            river_mask: vec![false; len],
+            dist_to_river: vec![u32::MAX; len],
+            water_surface_m: vec![0.0; len],
             biome: vec![Biome::Grassland; len],
         }
     }
@@ -76,7 +115,6 @@ impl WorldMap {
     /// Empty map carrying the physical scale of `config`.
     pub fn from_config(config: &WorldGenConfig) -> Self {
         Self {
-            generator_version: config.generator_version,
             cell_size_m: config.cell_size_m.0,
             ocean_floor_m: config.ocean_floor_m.0,
             max_elevation_m: config.max_elevation_m.0,
@@ -110,6 +148,19 @@ impl WorldMap {
         self.ocean_floor_m + f64::from(self.elevation[idx]) * span
     }
 
+    /// Index of the cell that `idx` drains into, if any.
+    pub fn downstream(&self, idx: usize) -> Option<usize> {
+        let code = self.flow_direction[idx];
+        if code == 0 {
+            return None;
+        }
+        let (dx, dy) = FLOW_OFFSETS[usize::from(code) - 1];
+        let x = (idx % self.width) as i32 + dx;
+        let y = (idx / self.width) as i32 + dy;
+        self.in_bounds(x, y)
+            .then(|| self.index(x as usize, y as usize))
+    }
+
     pub fn biome_histogram(&self) -> HashMap<Biome, usize> {
         let mut counts = HashMap::new();
         for &b in &self.biome {
@@ -129,7 +180,7 @@ mod tests {
         let config = WorldGenConfig {
             width: 10,
             height: 5,
-            ..WorldGenConfig::default().rescaled_to_cell_size(Meters(400.0))
+            ..WorldGenConfig::default()
         };
         let mut map = WorldMap::from_config(&config);
         assert_eq!(map.cell_size_m, 400.0);

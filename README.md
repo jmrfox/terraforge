@@ -2,7 +2,7 @@
 
 Deterministic procedural 2D world map generation for games and tools.
 
-Pipeline: **elevation → temperature → rainfall → water → biomes**
+Pipeline: **elevation → sea and coast → climate → hydrology → biomes**. Terrain is sampled in world meters, regional climate is modeled in °C and mm/year from latitude, elevation, and prevailing wind, and rainfall drains into rivers, lakes, and basins.
 
 <p align="center">
   <img src="examples/1.png" width="256" alt="Example map 1" />
@@ -28,12 +28,13 @@ Generation-only use does **not** require `--features gui`.
 
 **Entry points**
 
-- `generate_world(&WorldGenConfig)` — synchronous generation; panics on an unsupported generator version or empty grid
+- `generate_world(&WorldGenConfig)` — synchronous generation; panics on an empty grid
 - `try_generate_world(&WorldGenConfig)` — validates first and returns `ConfigError` on bad input
 - `generate_world_with_progress(config, progress)` — optional per-stage progress for large maps
 - `WorldGenConfig::from_json(text)` — strict preset loading that rejects unknown fields and invalid values
-- `WorldGenConfig::default()` or `serde_json` deserialize — lenient loading for saved configs
-- `config.rescaled_to_cell_size(Meters(m))` — change the cell size and scale length-related parameters so the map stays the same
+- `WorldGenConfig::default()` — a regional world at 400 m per cell
+- `config.rescaled_to_cell_size(Meters(m))` — change the cell size and scale length-related parameters so the terrain stays the same (climate then responds to the new real size)
+- `add_hydrology(&mut map, &config)` — recompute rivers, lakes, and basins on an existing map, without changing its terrain or climate
 - `sample_default_config(sample_seed, map_seed)` — optional parameter exploration from built-in priors
 
 **`WorldMap` output**
@@ -41,14 +42,21 @@ Generation-only use does **not** require `--features gui`.
 | Field | Range / type | Notes |
 |-------|----------------|-------|
 | `elevation`, `temperature`, `rainfall` | `[0, 1]` | Normalized simulation units |
-| `water_mask` | `bool` | Land vs water |
-| `dist_to_water` | `u32` | Manhattan distance in cells to the nearest below-sea-level cell |
+| `temperature_c`, `rainfall_mm` | `f32` | Mean annual °C and annual mm |
+| `water_mask` | `bool` | Ocean and lakes. Rivers stay land so they can be crossed |
+| `dist_to_water` | `u32` | Manhattan distance in cells to the nearest ocean or lake |
+| `river_mask` | `bool` | Land cells carrying a river |
+| `dist_to_river` | `u32` | Manhattan distance in cells to the nearest river |
+| `discharge_m3s` | `f32` | Mean annual flow in m³/s |
+| `flow_direction` | `u8` | Downstream direction; use `map.downstream(idx)` to follow it |
+| `basin_id` | `u32` | Drainage basin, or 0 on the ocean |
+| `water_surface_m` | `f32` | Sea level, lake level, or dry terrain height |
 | `ridge_influence` | `[0, 1]` | Mountain-belt signal from elevation stage |
 | `biome` | `Biome` | Final classification per cell |
 | `generator_version` | `u32` | Algorithm that produced the map |
 | `cell_size_m`, `ocean_floor_m`, `max_elevation_m`, `sea_level_m` | `f64` | Physical scale |
 
-Use `map.elevation_m(idx)`, `map.width_m()`, and `map.height_m()` for values in meters.
+Use `map.elevation_m(idx)`, `map.width_m()`, and `map.height_m()` for values in meters. Normalized temperature spans −15 to 35 °C and normalized rainfall spans 0 to 2000 mm/year.
 
 Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. Within 1.x, IDs are fixed:
 
@@ -66,17 +74,42 @@ Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. W
 | 9 | TropicalForest |
 | 10 | Mountain |
 
-**Stability (v1.0)**
+**Stability**
 
-- `WorldGenConfig` JSON field names are the preset contract; major version bumps may require preset migration.
-- The public API surface is `generate_world`, `WorldGenConfig`, `WorldMap`, export helpers in `preview`, and optional sampling in `priors`.
-- `generator_version` identifies the algorithm a config regenerates with. Configs saved without it are version 1. Golden-map tests in `tests/golden_maps.rs` fail if version 1 output changes.
-- `elevation_wavelength_m` is deprecated. Use `continent_wavelength_m`; the old field applies only when that value is zero or negative.
+- The public API surface is `generate_world`, `WorldGenConfig`, `WorldMap`, map storage, export helpers in `preview`, and optional sampling in `priors`.
+- The same config and seed produce the same map within a generator version. Generator changes may alter maps, so store maps you need to keep as `.tfmap` files.
+- `GENERATOR_VERSION` is recorded on each `WorldMap`. Golden-map tests in `tests/golden_maps.rs` detect unintended output changes.
+
+**Storing generated maps**
+
+Maps can be saved to a compressed `.tfmap` file and loaded without regenerating them, so a stored world does not change when the generator does.
+
+```rust
+use terraforge::{generate_world, load_map_file, save_map_file, MapFileError, WorldGenConfig};
+
+fn store_and_reload() -> Result<(), MapFileError> {
+    let config = WorldGenConfig::default();
+    let map = generate_world(&config);
+    save_map_file("worlds/home.tfmap", &map, &config)?;
+
+    let stored = load_map_file("worlds/home.tfmap")?;
+    let (map, config) = (stored.map, stored.config);
+    Ok(())
+}
+```
+
+- `save_map_file` and `load_map_file` work with paths. Saves replace the target file only after a complete write.
+- `write_stored_map` and `read_stored_map` work with any `Write` or `Read`. Each map is self-delimiting, so it can sit inside a larger save stream.
+- Storage is lossless, and every layer loads back bit-for-bit. Layers that can be rebuilt exactly are omitted to save space.
+- Truncated or corrupt data returns `MapFileError` and never yields a partial map.
+- A file from an unsupported format version returns `MapFileError::UnsupportedVersion`. There is no migration between format versions, so regenerate older maps.
 
 ```rust
 use terraforge::{WorldGenConfig, generate_world, sample_default_config};
 
 let map = generate_world(&WorldGenConfig::default());
+let celsius = map.temperature_c[0];
+let rainfall_mm = map.rainfall_mm[0];
 
 // Randomize numerical parameters from built-in priors (same as GUI "Sample & generate").
 let sampled = sample_default_config(99, Some(42));
@@ -92,14 +125,17 @@ cargo run --features gui --bin mapgui
 cargo run --release --features gui --bin mapgui   # faster generation
 ```
 
-The app auto-generates on startup (default 512×512). Use **Generate** after changing parameters, or **Sample & generate** to draw numerical parameters from built-in priors and randomize the map seed. Load/save presets as JSON; export always writes the biome PNG.
+The app auto-generates on startup (default 512×512). Use **Generate** after changing parameters, or **Sample & generate** to draw numerical parameters from built-in priors and randomize the map seed. Load/save presets as JSON, export the biome PNG, or use **Save map** and **Load map** for full compressed `.tfmap` maps.
 
-To change physical scale without changing the map, enter a value under **Rescale to cell size** in the Grid section and click **Apply**. Editing **Cell size** directly changes only that value, which changes the map.
+To change physical scale while keeping the terrain, enter a value under **Rescale to cell size** in the Grid section and click **Apply**. Editing **Cell size** directly changes only that value, which changes the map.
 
 ## Headless map preview (`mapgen` CLI)
 
 ```bash
 cargo run --bin mapgen -- -o out/map.png --width 512 --seed 42 --stats
+cargo run --bin mapgen -- -o out/arid.png --latitude-deg 24 --wind-from-deg 90 --seed 42
+cargo run --bin mapgen -- -o out/world.tfmap --seed 42
+cargo run --bin mapgen -- --load-map out/world.tfmap -o out/world.png
 cargo run --bin mapgen -- -o out/map.png --sample --stats
 cargo run --bin mapgen -- -o out/map.png --sample --sample-seed 99 --seed 42 --stats
 cargo run --bin mapgen -- -o out/map.tiff --format tiff --width 512 --seed 42 --stats

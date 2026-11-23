@@ -7,41 +7,33 @@ pub(crate) fn normalize01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
-/// Separable box blur with row-parallel passes.
+/// Box blur whose cost does not grow with `radius`. Edges repeat the border value.
 pub fn box_blur(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     if radius == 0 {
         return src.to_vec();
     }
-    let r = radius as i32;
+    let r = radius as isize;
+    let norm = (2 * radius + 1) as f64;
     let mut tmp = vec![0.0f32; src.len()];
-    let mut out = vec![0.0f32; src.len()];
-
     tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let line = &src[y * w..(y + 1) * w];
+        let at = |i: isize| f64::from(line[i.clamp(0, w as isize - 1) as usize]);
+        let mut sum: f64 = (-r..=r).map(at).sum();
         for (x, cell) in row.iter_mut().enumerate() {
-            let mut sum = 0.0f32;
-            let mut count = 0u32;
-            for dx in -r..=r {
-                let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                sum += src[y * w + nx];
-                count += 1;
-            }
-            *cell = sum / count as f32;
+            *cell = (sum / norm) as f32;
+            sum += at(x as isize + r + 1) - at(x as isize - r);
         }
     });
 
-    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+    let at = |x: usize, y: isize| f64::from(tmp[y.clamp(0, h as isize - 1) as usize * w + x]);
+    let mut sums: Vec<f64> = (0..w).map(|x| (-r..=r).map(|dy| at(x, dy)).sum()).collect();
+    let mut out = vec![0.0f32; src.len()];
+    for (y, row) in out.chunks_mut(w).enumerate() {
         for (x, cell) in row.iter_mut().enumerate() {
-            let mut sum = 0.0f32;
-            let mut count = 0u32;
-            for dy in -r..=r {
-                let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                sum += tmp[ny * w + x];
-                count += 1;
-            }
-            *cell = sum / count as f32;
+            *cell = (sums[x] / norm) as f32;
+            sums[x] += at(x, y as isize + r + 1) - at(x, y as isize - r);
         }
-    });
-
+    }
     out
 }
 
@@ -162,6 +154,32 @@ mod tests {
                 assert_eq!(chamfer[idx], 0);
             } else {
                 assert!(chamfer[idx] < u32::MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn box_blur_matches_direct_average() {
+        let (w, h) = (31usize, 17usize);
+        let field: Vec<f32> = (0..w * h)
+            .map(|i| ((i * 37 % 101) as f32) / 101.0)
+            .collect();
+        for radius in [0isize, 1, 3, 20] {
+            let blurred = box_blur(&field, w, h, radius as usize);
+            for y in 0..h as isize {
+                for x in 0..w as isize {
+                    let mut sum = 0.0f64;
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let nx = (x + dx).clamp(0, w as isize - 1) as usize;
+                            let ny = (y + dy).clamp(0, h as isize - 1) as usize;
+                            sum += f64::from(field[ny * w + nx]);
+                        }
+                    }
+                    let expected = sum / ((2 * radius + 1) * (2 * radius + 1)) as f64;
+                    let actual = f64::from(blurred[y as usize * w + x as usize]);
+                    assert!((expected - actual).abs() < 1e-4, "radius {radius}");
+                }
             }
         }
     }

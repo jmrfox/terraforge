@@ -6,6 +6,8 @@
 //! cargo run --bin mapgen -- -o out/map.tiff --format tiff --width 512 --seed 42
 //! cargo run --bin mapgen -- --batch presets.json --out-dir out/ --stats
 //! cargo run --bin mapgen -- --batch mapgen_presets/sample_batch.json --out-dir out/
+//! cargo run --bin mapgen -- -o out/world.tfmap --seed 42
+//! cargo run --bin mapgen -- --load-map out/world.tfmap -o out/world.png
 //! ```
 
 use std::collections::BTreeMap;
@@ -20,9 +22,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use terraforge::{
-    compute_map_stats, sample_parameters, try_generate_world, write_map_stats,
-    write_map_with_tiff_layers, Degrees, MapExportFormat, Meters, PriorSet, SquareMeters,
-    TiffLayerSet, WorldGenConfig,
+    compute_map_stats, load_map_file, sample_parameters, save_map_file, try_generate_world,
+    write_map_stats, write_map_with_tiff_layers, Degrees, MapExportFormat, Meters, PriorSet,
+    SquareMeters, TiffLayerSet, WorldGenConfig, WorldMap, MAP_FILE_EXTENSION,
 };
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -46,12 +48,21 @@ impl FormatArg {
 #[derive(Parser)]
 #[command(
     name = "mapgen",
-    about = "Generate procedural map previews (PNG or multi-page TIFF)"
+    about = "Generate procedural maps and export PNG, multi-page TIFF, or compressed .tfmap files"
 )]
 struct Cli {
-    /// Output path (single-run mode). Extension `.tiff`/`.tif` selects TIFF unless `--format` overrides.
+    /// Output path (single-run mode). `.tfmap` stores the full map; `.tiff`/`.tif` selects
+    /// TIFF unless `--format` overrides; anything else writes PNG.
     #[arg(short, long, conflicts_with = "batch")]
     output: Option<PathBuf>,
+
+    /// Also store the full map as a compressed `.tfmap` file.
+    #[arg(long, conflicts_with = "batch")]
+    save_map: Option<PathBuf>,
+
+    /// Load a stored `.tfmap` map instead of generating one.
+    #[arg(long, conflicts_with_all = ["batch", "config", "ConfigParams"])]
+    load_map: Option<PathBuf>,
 
     /// Output raster format (`auto` uses the file extension).
     #[arg(long, value_enum, default_value = "auto")]
@@ -107,9 +118,6 @@ struct ConfigParams {
     ocean_floor: Option<f64>,
 
     #[arg(long)]
-    #[serde(alias = "elevation_wavelength_m")]
-    elevation_wavelength: Option<f64>,
-    #[arg(long)]
     #[serde(alias = "continent_wavelength_m")]
     continent_wavelength: Option<f64>,
     #[arg(long)]
@@ -147,9 +155,6 @@ struct ConfigParams {
     min_lake_area: Option<f64>,
 
     #[arg(long)]
-    #[serde(alias = "temperature_range_c")]
-    temperature_range: Option<f64>,
-    #[arg(long)]
     #[serde(alias = "lapse_rate_c_per_km")]
     lapse_rate: Option<f64>,
     #[arg(long)]
@@ -158,15 +163,6 @@ struct ConfigParams {
     #[arg(long)]
     #[serde(alias = "temperature_wavelength_m")]
     temperature_wavelength: Option<f64>,
-    #[arg(long)]
-    continentality_strength: Option<f32>,
-    #[arg(long)]
-    #[serde(alias = "continentality_ocean_range_m")]
-    continentality_ocean_range: Option<f64>,
-    #[arg(long)]
-    orographic_elevation_weight: Option<f32>,
-    #[arg(long)]
-    interior_drying_factor: Option<f32>,
 
     #[arg(long)]
     #[serde(alias = "mountain_min_elevation_m")]
@@ -176,6 +172,29 @@ struct ConfigParams {
     mountain_min_slope: Option<f64>,
     #[arg(long)]
     mountain_min_ridge_influence: Option<f32>,
+
+    /// Latitude at the map center.
+    #[arg(long)]
+    latitude_deg: Option<f64>,
+    /// Compass direction the prevailing wind blows from.
+    #[arg(long)]
+    wind_from_deg: Option<f64>,
+    /// Annual rain from saturated air at 15 °C.
+    #[arg(long)]
+    base_rainfall_mm: Option<f64>,
+    /// Warms or cools the whole world.
+    #[arg(long, allow_negative_numbers = true)]
+    temperature_offset_c: Option<f64>,
+
+    /// Mean annual discharge at which a channel counts as a river.
+    #[arg(long)]
+    river_min_discharge_m3s: Option<f64>,
+    /// Minimum depression depth that can hold a lake.
+    #[arg(long)]
+    min_lake_depth_m: Option<f64>,
+    /// How far a river flowing at 10 m³/s cuts through a lake outlet.
+    #[arg(long)]
+    outlet_incision_m: Option<f64>,
 
     /// Sample numerical parameters from default priors before generation (same as GUI "Sample & generate").
     #[arg(long)]
@@ -255,10 +274,6 @@ impl ConfigParams {
         if let Some(v) = self.ocean_floor {
             config.ocean_floor_m = Meters(v);
         }
-        // Legacy spelling of the continent wavelength in CLI flags and batch manifests.
-        if let Some(v) = self.elevation_wavelength {
-            config.continent_wavelength_m = Meters(v);
-        }
         if let Some(v) = self.continent_wavelength {
             config.continent_wavelength_m = Meters(v);
         }
@@ -307,9 +322,6 @@ impl ConfigParams {
         if let Some(v) = self.min_lake_area {
             config.min_lake_area_m2 = SquareMeters(v);
         }
-        if let Some(v) = self.temperature_range {
-            config.temperature_range_c = v.max(1.0);
-        }
         if let Some(v) = self.lapse_rate {
             config.lapse_rate_c_per_km = v;
         }
@@ -319,18 +331,6 @@ impl ConfigParams {
         if let Some(v) = self.temperature_wavelength {
             config.temperature_wavelength_m = Meters(v);
         }
-        if let Some(v) = self.continentality_strength {
-            config.continentality_strength = v;
-        }
-        if let Some(v) = self.continentality_ocean_range {
-            config.continentality_ocean_range_m = Meters(v);
-        }
-        if let Some(v) = self.orographic_elevation_weight {
-            config.orographic_elevation_weight = v;
-        }
-        if let Some(v) = self.interior_drying_factor {
-            config.interior_drying_factor = v;
-        }
         if let Some(v) = self.mountain_min_elevation {
             config.mountain_min_elevation_m = Meters(v);
         }
@@ -339,6 +339,27 @@ impl ConfigParams {
         }
         if let Some(v) = self.mountain_min_ridge_influence {
             config.mountain_min_ridge_influence = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = self.latitude_deg {
+            config.regional_climate.latitude_deg = v;
+        }
+        if let Some(v) = self.wind_from_deg {
+            config.regional_climate.wind_from_deg = v;
+        }
+        if let Some(v) = self.base_rainfall_mm {
+            config.regional_climate.base_rainfall_mm = v;
+        }
+        if let Some(v) = self.temperature_offset_c {
+            config.regional_climate.temperature_offset_c = v;
+        }
+        if let Some(v) = self.river_min_discharge_m3s {
+            config.hydrology.river_min_discharge_m3s = v;
+        }
+        if let Some(v) = self.min_lake_depth_m {
+            config.hydrology.min_lake_depth_m = v;
+        }
+        if let Some(v) = self.outlet_incision_m {
+            config.hydrology.outlet_incision_m = v;
         }
         Ok(())
     }
@@ -415,14 +436,55 @@ fn generate_write_and_stats(
     Ok(())
 }
 
+fn is_map_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(MAP_FILE_EXTENSION))
+}
+
+fn save_stored(path: &Path, map: &WorldMap, config: &WorldGenConfig) -> Result<(), String> {
+    save_map_file(path, map, config).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Generate or load one map, then write every requested output.
 fn run_single(
-    config: &WorldGenConfig,
-    output: &Path,
-    format: MapExportFormat,
+    cli: &Cli,
+    generated_config: Option<WorldGenConfig>,
     tiff_layers: &TiffLayerSet,
-    stats_path: Option<&Path>,
 ) -> Result<(), String> {
-    generate_write_and_stats(config, output, format, tiff_layers, stats_path)
+    let start = Instant::now();
+    let (map, config) = match (&cli.load_map, generated_config) {
+        (Some(path), _) => {
+            let stored =
+                load_map_file(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            (stored.map, stored.config)
+        }
+        (None, Some(config)) => {
+            let map = try_generate_world(&config).map_err(|e| e.to_string())?;
+            (map, config)
+        }
+        (None, None) => return Err("no map to generate or load".to_string()),
+    };
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    if let Some(path) = &cli.save_map {
+        save_stored(path, &map, &config)?;
+    }
+    if let Some(output) = &cli.output {
+        if is_map_file(output) {
+            save_stored(output, &map, &config)?;
+        } else {
+            write_map_with_tiff_layers(&map, output, cli.format.resolve(output), *tiff_layers)
+                .map_err(|e| format!("write {}: {e}", output.display()))?;
+        }
+    }
+
+    let stats_base = cli.output.as_ref().or(cli.save_map.as_ref());
+    if let Some(path) = stats_base.and_then(|base| stats_path_from_flag(base, &cli.stats)) {
+        let stats = compute_map_stats(&map, &config, elapsed);
+        write_map_stats(&stats, &path).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn run_batch(
@@ -505,29 +567,22 @@ fn main() -> ExitCode {
             cli.stats.is_some(),
         )
     } else {
-        let output = match cli.output {
-            Some(ref p) => p.clone(),
-            None => {
-                eprintln!("error: --output required (or use --batch)");
-                return ExitCode::from(2);
+        if cli.output.is_none() && cli.save_map.is_none() {
+            eprintln!("error: --output or --save-map required (or use --batch)");
+            return ExitCode::from(2);
+        }
+        let config = if cli.load_map.is_some() {
+            None
+        } else {
+            match build_config(&cli) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
             }
         };
-        let format = cli.format.resolve(&output);
-        let config = match build_config(&cli) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(2);
-            }
-        };
-        let stats_path = stats_path_from_flag(&output, &cli.stats);
-        run_single(
-            &config,
-            &output,
-            format,
-            &tiff_layers,
-            stats_path.as_deref(),
-        )
+        run_single(&cli, config, &tiff_layers)
     };
 
     match result {

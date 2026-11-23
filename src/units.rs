@@ -59,14 +59,6 @@ impl Degrees {
     }
 }
 
-/// Map extent wavelength to noise frequency (cycles per normalized map width).
-pub fn wavelength_to_frequency(map_extent_m: f64, wavelength_m: Meters) -> f64 {
-    if wavelength_m.0 <= 0.0 {
-        return 1.0;
-    }
-    map_extent_m / wavelength_m.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,12 +74,5 @@ mod tests {
     fn area_to_cells_default_grid() {
         assert_eq!(SquareMeters(9600.0).to_cell_count(20.0), 24);
         assert_eq!(SquareKilometers(0.01536).to_cell_count(20.0), 38);
-    }
-
-    #[test]
-    fn wavelength_frequency_calibration() {
-        let map_w = 512.0 * 20.0;
-        assert!((wavelength_to_frequency(map_w, Meters(5120.0)) - 2.0).abs() < 0.01);
-        assert!((wavelength_to_frequency(map_w, Meters(1024.0)) - 10.0).abs() < 0.01);
     }
 }

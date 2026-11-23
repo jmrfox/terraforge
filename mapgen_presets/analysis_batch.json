@@ -14,7 +14,7 @@
     { "name": "low_land_20", "seed": 42, "target_land_fraction": 0.20 },
     { "name": "no_edge_bias", "seed": 42, "edge_ocean_bias": 0.0 },
     { "name": "strong_edge_bias", "seed": 42, "edge_ocean_bias": 0.25 },
-    { "name": "short_continents", "seed": 42, "continent_wavelength_m": 2560.0 },
-    { "name": "long_continents", "seed": 42, "continent_wavelength_m": 10240.0 }
+    { "name": "short_continents", "seed": 42, "continent_wavelength_m": 51200.0 },
+    { "name": "long_continents", "seed": 42, "continent_wavelength_m": 204800.0 }
   ]
 }

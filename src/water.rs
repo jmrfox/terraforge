@@ -1,44 +1,31 @@
-use rayon::prelude::*;
+//! Water classification before climate, so filled ponds become ordinary land.
 
-use super::config::{ResolvedSimParams, WorldGenConfig};
-use super::progress::{report, ProgressHandle};
-use super::world::{Biome, WorldMap};
+use crate::config::ResolvedSimParams;
+use crate::grid_ops::chamfer_distance_water;
+use crate::world::{Biome, WorldMap};
 
-/// Classify water as ocean (edge-connected) or lake (enclosed depression).
-pub fn generate_water(
-    map: &mut WorldMap,
-    _config: &WorldGenConfig,
-    params: &ResolvedSimParams,
-    progress: &Option<ProgressHandle>,
-    stage_start: f32,
-    stage_end: f32,
-) {
-    report(progress, stage_start, "Classifying water");
-
+/// Mark ocean and lakes, fill small ponds to sea level, and measure distance to water.
+pub fn generate(map: &mut WorldMap, params: &ResolvedSimParams) {
     let sea = params.sea_level_norm;
-    let elevation = map.elevation.as_slice();
+    for (is_water, &elevation) in map.water_mask.iter_mut().zip(&map.elevation) {
+        *is_water = elevation < sea;
+    }
 
-    map.water_mask
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, cell)| {
-            *cell = elevation[idx] < sea;
-        });
+    let ocean = flood_ocean_from_edges(map);
+    remove_small_inland_water(map, &ocean, params.min_lake_cells);
+    for (elevation, &is_water) in map.elevation.iter_mut().zip(&map.water_mask) {
+        if !is_water && *elevation < sea {
+            *elevation = sea;
+        }
+    }
 
-    map.dist_to_water =
-        super::grid_ops::chamfer_distance_water(map.width, map.height, &map.water_mask);
-
-    let mut ocean_mask = flood_ocean_from_edges(map);
-    remove_small_inland_water(map, &ocean_mask, params.min_lake_cells);
-    ocean_mask = flood_ocean_from_edges(map);
-
-    for (idx, &is_ocean) in ocean_mask.iter().enumerate() {
+    let ocean = flood_ocean_from_edges(map);
+    for (idx, &is_ocean) in ocean.iter().enumerate() {
         if map.water_mask[idx] {
             map.biome[idx] = if is_ocean { Biome::Ocean } else { Biome::Lake };
         }
     }
-
-    report(progress, stage_end, "Water classified");
+    map.dist_to_water = chamfer_distance_water(map.width, map.height, &map.water_mask);
 }
 
 fn flood_ocean_from_edges(map: &WorldMap) -> Vec<bool> {
@@ -141,28 +128,36 @@ fn remove_small_inland_water(map: &mut WorldMap, ocean_mask: &[bool], min_cells:
 mod tests {
     use super::*;
     use crate::config::WorldGenConfig;
-    use crate::world::WorldMap;
 
     #[test]
-    fn ocean_cells_connect_to_edge() {
-        let config = WorldGenConfig::test_config(5, 16);
-        let mut map = WorldMap::new(config.width, config.height, config.seed);
-        for y in 0..map.height {
-            for x in 0..map.width {
-                let idx = map.index(x, y);
-                map.elevation[idx] = if y == map.height - 1 { 0.1 } else { 0.9 };
-            }
-        }
+    fn classifies_ocean_lakes_and_fills_ponds() {
+        let config = WorldGenConfig {
+            width: 16,
+            height: 16,
+            min_lake_area_m2: crate::SquareMeters(4.0 * 400.0 * 400.0),
+            ..WorldGenConfig::default()
+        };
         let params = config.resolve();
-        generate_water(&mut map, &config, &params, &None, 0.0, 1.0);
-
-        for y in 0..map.height {
-            for x in 0..map.width {
-                let idx = map.index(x, y);
-                if map.biome[idx] == Biome::Ocean {
-                    assert!(map.water_mask[idx]);
-                }
-            }
+        let sea = params.sea_level_norm;
+        let mut map = WorldMap::from_config(&config);
+        map.elevation.fill(sea + 0.1);
+        for x in 0..16 {
+            let idx = map.index(x, 15);
+            map.elevation[idx] = sea - 0.2;
         }
+        for (x, y) in [(4, 4), (5, 4), (4, 5), (5, 5)] {
+            let idx = map.index(x, y);
+            map.elevation[idx] = sea - 0.1;
+        }
+        let pond = map.index(10, 8);
+        map.elevation[pond] = sea - 0.1;
+
+        generate(&mut map, &params);
+
+        assert_eq!(map.biome[map.index(3, 15)], Biome::Ocean);
+        assert_eq!(map.biome[map.index(4, 4)], Biome::Lake);
+        assert!(!map.water_mask[pond]);
+        assert_eq!(map.elevation[pond], sea);
+        assert!(map.dist_to_water[pond] > 0);
     }
 }

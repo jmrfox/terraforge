@@ -7,11 +7,11 @@
   "variants": [
     {
       "name": "wavelength_short",
-      "elevation_wavelength_m": 2560.0
+      "continent_wavelength_m": 51200.0
     },
     {
       "name": "wavelength_long",
-      "elevation_wavelength_m": 10240.0
+      "continent_wavelength_m": 204800.0
     },
     {
       "name": "sea_low",

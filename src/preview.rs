@@ -237,6 +237,7 @@ pub fn map_to_preview_rgba8(map: &WorldMap, layer: PreviewLayer) -> Vec<u8> {
 
 const WATER_BLUE: [u8; 4] = [32, 64, 140, 255];
 const LAND_TAN: [u8; 4] = [160, 140, 100, 255];
+const RIVER_BLUE: [u8; 4] = [70, 130, 210, 255];
 
 fn water_to_rgba8(map: &WorldMap) -> Vec<u8> {
     let len = map.width * map.height;
@@ -244,6 +245,8 @@ fn water_to_rgba8(map: &WorldMap) -> Vec<u8> {
     pixels.par_chunks_mut(4).enumerate().for_each(|(idx, px)| {
         let color = if map.water_mask[idx] {
             WATER_BLUE
+        } else if map.river_mask[idx] {
+            RIVER_BLUE
         } else {
             LAND_TAN
         };
@@ -268,7 +271,11 @@ pub fn map_to_rgba8(map: &WorldMap) -> Vec<u8> {
     let mut pixels = vec![0u8; len * 4];
 
     pixels.par_chunks_mut(4).enumerate().for_each(|(idx, px)| {
-        let color = biome_rgba(map.biome[idx]);
+        let color = if map.river_mask[idx] {
+            RIVER_BLUE
+        } else {
+            biome_rgba(map.biome[idx])
+        };
         px.copy_from_slice(&color);
     });
 
@@ -303,6 +310,24 @@ pub fn biome_to_id(biome: Biome) -> u16 {
         Biome::TropicalForest => 9,
         Biome::Mountain => 10,
     }
+}
+
+/// Biome for a stable discriminant from [`biome_to_id`], or `None` if it is unknown.
+pub fn biome_from_id(id: u16) -> Option<Biome> {
+    Some(match id {
+        0 => Biome::Ocean,
+        1 => Biome::Lake,
+        2 => Biome::Ice,
+        3 => Biome::Tundra,
+        4 => Biome::Taiga,
+        5 => Biome::Grassland,
+        6 => Biome::TemperateForest,
+        7 => Biome::Desert,
+        8 => Biome::Savanna,
+        9 => Biome::TropicalForest,
+        10 => Biome::Mountain,
+        _ => return None,
+    })
 }
 
 pub fn map_biome_id_to_gray16(map: &WorldMap) -> Vec<u16> {
@@ -526,6 +551,14 @@ fn biome_label(biome: Biome) -> &'static str {
 mod tests {
     use super::*;
     use crate::{generate_world, WorldGenConfig};
+
+    #[test]
+    fn biome_ids_round_trip() {
+        for id in 0..=10 {
+            assert_eq!(biome_to_id(biome_from_id(id).unwrap()), id);
+        }
+        assert_eq!(biome_from_id(11), None);
+    }
 
     #[test]
     fn map_to_rgba8_correct_length() {
