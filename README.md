@@ -35,6 +35,7 @@ Generation-only use does **not** require `--features gui`.
 - `WorldGenConfig::default()` — a regional world at 400 m per cell
 - `config.rescaled_to_cell_size(Meters(m))` — change the cell size and scale length-related parameters so the terrain stays the same (climate then responds to the new real size)
 - `add_hydrology(&mut map, &config)` — recompute rivers, lakes, and basins on an existing map, without changing its terrain or climate
+- `WorldControl` — high-level controls for world size, ruggedness, climate, aridity, and wind
 - `sample_default_config(sample_seed, map_seed)` — optional parameter exploration from built-in priors
 
 **`WorldMap` output**
@@ -56,7 +57,7 @@ Generation-only use does **not** require `--features gui`.
 | `generator_version` | `u32` | Algorithm that produced the map |
 | `cell_size_m`, `ocean_floor_m`, `max_elevation_m`, `sea_level_m` | `f64` | Physical scale |
 
-Use `map.elevation_m(idx)`, `map.width_m()`, and `map.height_m()` for values in meters. Normalized temperature spans −15 to 35 °C and normalized rainfall spans 0 to 2000 mm/year.
+Use `map.elevation_m(idx)`, `map.width_m()`, and `map.height_m()` for values in meters. Normalized temperature spans −15 to 35 °C. Normalized rainfall is `1 - exp(-mm / 1500)`, which stays close to `mm / 2000` below 1000 mm and does not saturate in wet climates.
 
 Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. Within 1.x, IDs are fixed:
 
@@ -79,6 +80,32 @@ Use `biome_to_id` and `LEGEND_ENTRIES` when you need stable numeric biome IDs. W
 - The public API surface is `generate_world`, `WorldGenConfig`, `WorldMap`, map storage, export helpers in `preview`, and optional sampling in `priors`.
 - The same config and seed produce the same map within a generator version. Generator changes may alter maps, so store maps you need to keep as `.tfmap` files.
 - `GENERATOR_VERSION` is recorded on each `WorldMap`. Golden-map tests in `tests/golden_maps.rs` detect unintended output changes.
+
+**High-level controls**
+
+`WorldControl` shapes a world without touching individual parameters. Controls write ordinary `WorldGenConfig` fields, so presets and stored maps need nothing extra.
+
+```rust
+use terraforge::{generate_world, WorldControl, WorldGenConfig};
+
+let mut config = WorldGenConfig::default();
+WorldControl::Scale.apply(&mut config, 1000.0); // longest side in km
+WorldControl::Ruggedness.apply(&mut config, 0.7); // 0 smooth, 1 rugged
+WorldControl::Climate.apply(&mut config, 0.75); // 0 polar, 1 tropical
+WorldControl::Aridity.apply(&mut config, 0.8); // 0 wet, 1 arid
+WorldControl::Wind.apply(&mut config, 90.0); // compass direction the wind blows from
+let map = generate_world(&config);
+```
+
+| Control | Fields it writes |
+|---------|------------------|
+| `Scale` | Cell size and all length-related fields, keeping the terrain |
+| `Ruggedness` | Ridge weight, detail weight, persistence, minimum ridge influence for mountains |
+| `Climate` | Latitude (keeping the hemisphere), temperature offset |
+| `Aridity` | Base rainfall, subtropical drying |
+| `Wind` | Wind direction |
+
+Position 0.5 on `Ruggedness`, `Climate`, and `Aridity` is the default config. `control.value(&config)` reads a control's position, and `control.is_custom(&config)` reports when its fields were edited to a combination the control cannot produce. Moving the control replaces those fields and leaves all others alone.
 
 **Storing generated maps**
 
@@ -125,7 +152,7 @@ cargo run --features gui --bin mapgui
 cargo run --release --features gui --bin mapgui   # faster generation
 ```
 
-The app auto-generates on startup (default 512×512). Use **Generate** after changing parameters, or **Sample & generate** to draw numerical parameters from built-in priors and randomize the map seed. Load/save presets as JSON, export the biome PNG, or use **Save map** and **Load map** for full compressed `.tfmap` maps.
+The app auto-generates on startup (default 512×512). The **World** section holds the five high-level controls, and the map updates when you release one. All individual parameters are under **Advanced**, and a control shows **custom** when its Advanced values no longer match it. Use **Generate** after changing other parameters, or **Sample & generate** to draw numerical parameters from built-in priors and randomize the map seed. Load/save presets as JSON, export the biome PNG, or use **Save map** and **Load map** for full compressed `.tfmap` maps.
 
 To change physical scale while keeping the terrain, enter a value under **Rescale to cell size** in the Grid section and click **Apply**. Editing **Cell size** directly changes only that value, which changes the map.
 

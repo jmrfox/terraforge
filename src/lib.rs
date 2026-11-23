@@ -7,6 +7,7 @@ mod biomes;
 mod climate;
 mod colors;
 mod config;
+mod controls;
 mod elevation;
 mod grid_ops;
 mod hydrology;
@@ -21,12 +22,13 @@ mod units;
 mod water;
 mod world;
 
-pub use climate::{RAINFALL_NORM_MAX_MM, TEMPERATURE_NORM_MAX_C, TEMPERATURE_NORM_MIN_C};
+pub use climate::{RAINFALL_NORM_SCALE_MM, TEMPERATURE_NORM_MAX_C, TEMPERATURE_NORM_MIN_C};
 pub use colors::{biome_rgba, LEGEND_ENTRIES};
 pub use config::{
     calibrate_sea_level_norm, ConfigError, ElevationEnvelopeConfig, HydrologyConfig,
     RegionalClimateConfig, ResolvedSimParams, WorldGenConfig, GENERATOR_VERSION,
 };
+pub use controls::WorldControl;
 pub use map_file::{
     load_map_file, read_stored_map, save_map_file, write_stored_map, MapFileError, StoredMap,
     MAP_FILE_EXTENSION, MAP_FILE_VERSION,

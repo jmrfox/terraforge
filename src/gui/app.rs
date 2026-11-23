@@ -26,6 +26,7 @@ enum GenState {
 pub struct MapGuiApp {
     config: WorldGenConfig,
     rescale_cell_size_m: f64,
+    auto_generate: bool,
     prior_set: PriorSet,
     calibrate_land_target: f32,
     gen_state: GenState,
@@ -49,6 +50,7 @@ impl MapGuiApp {
         let config = WorldGenConfig::default();
         let mut app = Self {
             rescale_cell_size_m: config.cell_size_m.0,
+            auto_generate: true,
             config,
             prior_set: PriorSet::default_priors(),
             calibrate_land_target: 0.30,
@@ -531,6 +533,7 @@ impl eframe::App for MapGuiApp {
         self.poll_generation(ctx);
         self.handle_file_dialogs(ctx);
 
+        let mut regenerate = false;
         egui::SidePanel::left("params_panel")
             .resizable(true)
             .default_width(340.0)
@@ -541,15 +544,22 @@ impl eframe::App for MapGuiApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        regenerate = draw_params(
+                            ui,
+                            &mut self.config,
+                            &mut self.rescale_cell_size_m,
+                            &mut self.auto_generate,
+                        );
                         egui::CollapsingHeader::new("Parameter sampling")
                             .default_open(false)
                             .show(ui, |ui| {
                                 draw_sampling(ui, &mut self.prior_set);
                             });
-                        ui.separator();
-                        draw_params(ui, &mut self.config, &mut self.rescale_cell_size_m);
                     });
             });
+        if regenerate {
+            self.start_generation();
+        }
 
         egui::SidePanel::right("info_panel")
             .resizable(true)

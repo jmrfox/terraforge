@@ -37,7 +37,7 @@ Order: **elevation → sea and coast → climate → hydrology → biomes**. Coa
 - **Temperature:** sea-level temperature from latitude, plus `temperature_offset_c` and local noise, minus the lapse rate over height above sea level.
 - **Rainfall:** a steady upwind sweep carries moisture along `wind_from_deg`. Air recharges over water and rains as it travels. Rising terrain cools air and lowers its saturation humidity, so excess moisture condenses on the windward side and the lee side is drier.
 - A subtropical dry belt near 27° latitude reduces rainfall by up to `subtropical_drying`.
-- Outputs `temperature_c` and `rainfall_mm`, plus the normalized `temperature` (−15 to 35 °C) and `rainfall` (0 to 2000 mm/year, zero on water) layers.
+- Outputs `temperature_c` and `rainfall_mm`, plus the normalized `temperature` (−15 to 35 °C) and `rainfall` (`1 - exp(-mm / 1500)`, zero on water) layers. That curve stays close to `mm / 2000` below 1000 mm and does not saturate in wet climates.
 - Transcendental math uses `libm` so results match across platforms.
 
 ### 4. Hydrology (`hydrology.rs`)
@@ -52,7 +52,7 @@ Order: **elevation → sea and coast → climate → hydrology → biomes**. Coa
 
 ### 5. Biomes (`biomes.rs`)
 
-- **Mountain:** normalized elevation ≥ `mountain_elev_norm`, neighbor slope ≥ `mountain_slope_norm`, and `ridge_influence` ≥ `mountain_min_ridge_influence`.
+- **Mountain:** elevation at or above `mountain_min_elevation_m`, `ridge_influence` at or above `mountain_min_ridge_influence`, and enough slope on smoothed terrain. The required slope starts at `mountain_min_slope_deg` and fades to zero 1000 m above the minimum elevation, so flat summits still count while low plateaus do not.
 - Other land is classified from mean annual °C and annual rainfall, with the Köppen desert limit `10 × T + 140` mm.
 
 ## `WorldMap` fields
@@ -77,6 +77,7 @@ Order: **elevation → sea and coast → climate → hydrology → biomes**. Coa
 
 - **Preview / export:** `preview.rs` — RGB biome map, multi-page TIFF layers, JSON stats sidecar.
 - **Map storage:** `map_file.rs` — lossless compressed `.tfmap` import and export. The header holds a magic number, format version, compressed length, and checksum. The zlib payload holds map metadata, the generation config, and delta-coded layers. Layers that can be rebuilt exactly are omitted.
+- **High-level controls:** `controls.rs` — world size, ruggedness, climate, aridity, and wind. Each one reads and writes ordinary config fields and runs before generation, so it does not affect `GENERATOR_VERSION`.
 - **Parameter sampling:** `priors.rs` — random parameter exploration from prior distributions (GUI, CLI `--sample`, library).
 
 ## Generator version

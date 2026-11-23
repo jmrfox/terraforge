@@ -3,35 +3,18 @@
 use rayon::prelude::*;
 
 use crate::config::ResolvedSimParams;
+use crate::grid_ops::box_blur;
 use crate::world::{Biome, WorldMap};
 
-const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-
-fn interior_slope_at(
-    width: usize,
-    height: usize,
-    elevation: &[f32],
-    water: &[bool],
-    x: usize,
-    y: usize,
-) -> f32 {
-    let idx = y * width + x;
-    let elev = elevation[idx];
-    let mut max_delta = 0.0f32;
-
-    for (dx, dy) in DIRS {
-        let nx = x as i32 + dx;
-        let ny = y as i32 + dy;
-        if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
-            continue;
-        }
-        let nidx = ny as usize * width + nx as usize;
-        if water[nidx] {
-            continue;
-        }
-        max_delta = max_delta.max((elev - elevation[nidx]).abs());
-    }
-    max_delta
+/// Gradient magnitude per cell. Smoothed terrain keeps single noisy cells from punching
+/// holes in mountain ranges.
+fn slope_at(smoothed: &[f32], width: usize, height: usize, x: usize, y: usize) -> f32 {
+    let (left, right) = (x.saturating_sub(1), (x + 1).min(width - 1));
+    let (up, down) = (y.saturating_sub(1), (y + 1).min(height - 1));
+    let dx =
+        (smoothed[y * width + right] - smoothed[y * width + left]) / (right - left).max(1) as f32;
+    let dy = (smoothed[down * width + x] - smoothed[up * width + x]) / (down - up).max(1) as f32;
+    (dx * dx + dy * dy).sqrt()
 }
 
 /// Classification from mean annual °C and annual rainfall in mm.
@@ -72,6 +55,7 @@ pub fn generate(map: &mut WorldMap, params: &ResolvedSimParams) {
     let ridge = map.ridge_influence.as_slice();
     let temperature = map.temperature_c.as_slice();
     let rainfall = map.rainfall_mm.as_slice();
+    let smoothed = box_blur(elevation, w, h, params.mountain_smoothing_cells);
 
     map.biome
         .par_chunks_mut(w)
@@ -82,10 +66,13 @@ pub fn generate(map: &mut WorldMap, params: &ResolvedSimParams) {
                 if water[idx] {
                     continue;
                 }
-                let is_mountain = elevation[idx] >= params.mountain_elev_norm
+                // Summits are locally flat, so higher ground needs less slope to count.
+                let above_minimum = elevation[idx] - params.mountain_elev_norm;
+                let slope_needed = params.mountain_slope_norm
+                    * (1.0 - (above_minimum / params.mountain_slope_fade_norm).clamp(0.0, 1.0));
+                let is_mountain = above_minimum >= 0.0
                     && ridge[idx] >= params.mountain_min_ridge_influence
-                    && interior_slope_at(w, h, elevation, water, x, y)
-                        >= params.mountain_slope_norm;
+                    && slope_at(&smoothed, w, h, x, y) >= slope_needed;
                 *cell = if is_mountain {
                     Biome::Mountain
                 } else {
@@ -122,6 +109,53 @@ mod tests {
             .copied()
             .unwrap_or(0);
         assert!(mountains > 0, "expected Mountain biomes on default config");
+    }
+
+    fn mountain_count(config: &WorldGenConfig) -> usize {
+        generate_world(config)
+            .biome
+            .iter()
+            .filter(|b| **b == Biome::Mountain)
+            .count()
+    }
+
+    #[test]
+    fn slope_and_ridge_controls_affect_default_maps() {
+        let base = WorldGenConfig::default();
+        let count = mountain_count(&base);
+        let no_slope = mountain_count(&WorldGenConfig {
+            mountain_min_slope_deg: crate::Degrees(0.0),
+            ..base.clone()
+        });
+        let no_ridge = mountain_count(&WorldGenConfig {
+            mountain_min_ridge_influence: 0.0,
+            ..base
+        });
+        assert!(no_slope > count, "slope gate has no effect");
+        assert!(no_ridge > count, "ridge gate has no effect");
+    }
+
+    #[test]
+    fn high_flat_summits_are_mountains_but_low_flats_are_not() {
+        let config = WorldGenConfig {
+            width: 16,
+            height: 16,
+            ..WorldGenConfig::default()
+        };
+        let params = config.resolve();
+        let classify = |elevation_m: f64| {
+            let mut map = WorldMap::from_config(&config);
+            let norm = (elevation_m - params.ocean_floor_m)
+                / (params.max_elevation_m - params.ocean_floor_m);
+            map.elevation.fill(norm as f32);
+            map.ridge_influence.fill(0.8);
+            map.temperature_c.fill(5.0);
+            map.rainfall_mm.fill(800.0);
+            generate(&mut map, &params);
+            map.biome[map.index(8, 8)]
+        };
+        assert_ne!(classify(2500.0), Biome::Mountain, "flat plateau");
+        assert_eq!(classify(3500.0), Biome::Mountain, "high summit");
     }
 
     #[test]

@@ -21,8 +21,9 @@ use crate::world::WorldMap;
 pub const TEMPERATURE_NORM_MIN_C: f32 = -15.0;
 /// °C mapped to 1 in the normalized `WorldMap::temperature` layer.
 pub const TEMPERATURE_NORM_MAX_C: f32 = 35.0;
-/// Annual rainfall in mm mapped to 1 in the normalized `WorldMap::rainfall` layer.
-pub const RAINFALL_NORM_MAX_MM: f32 = 2000.0;
+/// Scale of the normalized `WorldMap::rainfall` layer: `1 - exp(-mm / scale)`. This stays
+/// close to `mm / 2000` below 1000 mm and approaches 1 without saturating in wet climates.
+pub const RAINFALL_NORM_SCALE_MM: f32 = 1500.0;
 
 const METERS_PER_DEGREE_LATITUDE: f64 = 111_320.0;
 /// Fits Earth's zonal mean temperatures better than a plain cosine.
@@ -274,7 +275,7 @@ pub(crate) fn normalized_rainfall(rainfall_mm: f32, is_water: bool) -> f32 {
     if is_water {
         0.0
     } else {
-        (rainfall_mm / RAINFALL_NORM_MAX_MM).clamp(0.0, 1.0)
+        (1.0 - libm::expf(-rainfall_mm / RAINFALL_NORM_SCALE_MM)).clamp(0.0, 1.0)
     }
 }
 
@@ -337,6 +338,23 @@ mod tests {
             let relative = (ra - rb).abs() / ra.max(1.0);
             assert!(relative < 0.08, "{km} km: {ra} vs {rb}");
         }
+    }
+
+    #[test]
+    fn normalized_rainfall_tracks_low_values_and_never_saturates() {
+        for mm in [200.0f32, 500.0, 800.0, 1000.0] {
+            let linear = mm / 2000.0;
+            assert!(
+                (normalized_rainfall(mm, false) - linear).abs() < 0.04,
+                "{mm}"
+            );
+        }
+        let (wet, wetter) = (
+            normalized_rainfall(3000.0, false),
+            normalized_rainfall(6000.0, false),
+        );
+        assert!(wet < wetter && wetter < 1.0);
+        assert_eq!(normalized_rainfall(3000.0, true), 0.0);
     }
 
     #[test]

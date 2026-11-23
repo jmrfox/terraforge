@@ -8,7 +8,7 @@ use crate::units::{Degrees, Meters, SquareMeters};
 /// Generator algorithm in this build, recorded on every map it produces.
 ///
 /// Bump this when a change alters output for an existing config.
-pub const GENERATOR_VERSION: u32 = 3;
+pub const GENERATOR_VERSION: u32 = 4;
 
 /// One or more problems found while loading or validating a [`WorldGenConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,10 +107,10 @@ impl Default for RegionalClimateConfig {
             temperature_offset_c: 0.0,
             temperature_variation_c: 3.0,
             wind_from_deg: 270.0,
-            base_rainfall_mm: 1400.0,
+            base_rainfall_mm: 1800.0,
             rainfall_variation: 0.25,
             rainout_length_m: Meters(800_000.0),
-            orographic_efficiency: 0.3,
+            orographic_efficiency: 0.12,
             orographic_smoothing_m: Meters(6_000.0),
             subtropical_drying: 0.6,
         }
@@ -134,7 +134,7 @@ pub struct HydrologyConfig {
 impl Default for HydrologyConfig {
     fn default() -> Self {
         Self {
-            river_min_discharge_m3s: 3.0,
+            river_min_discharge_m3s: 2.0,
             min_lake_depth_m: 60.0,
             outlet_incision_m: 400.0,
         }
@@ -209,8 +209,12 @@ pub struct ResolvedSimParams {
     pub sea_level_norm: f32,
     pub min_lake_cells: usize,
     pub mountain_elev_norm: f32,
-    /// Minimum normalized elevation delta between land neighbors (not tan of degrees).
+    /// Minimum normalized elevation change per cell on the smoothed terrain.
     pub mountain_slope_norm: f32,
+    /// Smoothing radius for the mountain slope test, in cells.
+    pub mountain_smoothing_cells: usize,
+    /// Normalized height above the mountain minimum where no slope is required.
+    pub mountain_slope_fade_norm: f32,
     pub mountain_min_ridge_influence: f32,
 }
 
@@ -475,6 +479,10 @@ impl WorldGenConfig {
             min_lake_cells: self.min_lake_area_m2.to_cell_count(cell).max(1),
             mountain_elev_norm,
             mountain_slope_norm,
+            // Tied to terrain detail, so it measures hillsides at any cell size.
+            mountain_smoothing_cells: ((self.detail_wavelength_m.0 * 0.08 / cell).round() as usize)
+                .clamp(1, self.width.max(self.height).max(1)),
+            mountain_slope_fade_norm: (1000.0 / elev_span) as f32,
             mountain_min_ridge_influence: self.mountain_min_ridge_influence,
         }
     }
@@ -556,9 +564,9 @@ impl Default for WorldGenConfig {
 
             hydrology: HydrologyConfig::default(),
 
-            mountain_min_elevation_m: Meters(2900.0),
-            mountain_min_slope_deg: Degrees(0.20032474367796477),
-            mountain_min_ridge_influence: 0.06,
+            mountain_min_elevation_m: Meters(2400.0),
+            mountain_min_slope_deg: Degrees(6.0),
+            mountain_min_ridge_influence: 0.45,
         }
     }
 }
@@ -605,7 +613,8 @@ mod tests {
     #[test]
     fn resolve_mountain_slope_norm_uses_cell_and_elev_span() {
         let p = WorldGenConfig::default().resolve();
-        assert!(p.mountain_slope_norm > 0.0 && p.mountain_slope_norm < 0.001);
+        let expected = 6.0f64.to_radians().tan() * 400.0 / 15_000.0;
+        assert!((f64::from(p.mountain_slope_norm) - expected).abs() < 1e-6);
     }
 
     #[test]

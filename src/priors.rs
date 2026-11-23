@@ -329,7 +329,7 @@ fn build_default_priors() -> Vec<SampleableParam> {
             "Base rainfall (mm/yr)",
             CLIMATE,
             true,
-            log_u(1400.0, 1.6),
+            log_u(1800.0, 1.6),
         ),
         entry(
             P::RainfallScale,
@@ -350,14 +350,14 @@ fn build_default_priors() -> Vec<SampleableParam> {
             "Mountain min elevation (m)",
             MOUNTAINS,
             true,
-            around(2900.0, 500.0),
+            around(2400.0, 400.0),
         ),
         entry(
             P::MountainMinRidgeInfluence,
             "Mountain min ridge influence",
             MOUNTAINS,
             true,
-            around(0.06, 0.025),
+            around(0.45, 0.08),
         ),
     ]
 }
@@ -393,7 +393,7 @@ fn constrain_sampled_config(config: &mut WorldGenConfig, priors: &PriorSet, scal
         config.elevation_ridge_weight = config.elevation_ridge_weight.clamp(0.08, 0.35);
     }
     if on(P::MountainMinRidgeInfluence) {
-        config.mountain_min_ridge_influence = config.mountain_min_ridge_influence.clamp(0.03, 0.12);
+        config.mountain_min_ridge_influence = config.mountain_min_ridge_influence.clamp(0.25, 0.65);
     }
     if on(P::TargetLandFraction) {
         if let Some(ref mut land) = config.target_land_fraction {

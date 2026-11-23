@@ -3,9 +3,17 @@ use terraforge::{
     ElevationEnvelopeConfig, Meters, RegionalClimateConfig, SquareMeters, WorldGenConfig,
 };
 
+use super::world_controls::draw_world_controls;
+
 const RESET_BTN: &str = "↺";
 
-pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig, rescale_cell_size_m: &mut f64) {
+/// Draw all parameters. Returns true when a high-level control asks to regenerate.
+pub fn draw_params(
+    ui: &mut Ui,
+    config: &mut WorldGenConfig,
+    rescale_cell_size_m: &mut f64,
+    auto_generate: &mut bool,
+) -> bool {
     let defaults = WorldGenConfig::default();
 
     ui.horizontal_wrapped(|ui| {
@@ -22,10 +30,9 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig, rescale_cell_size_m
         resolved.map_width_m / 1000.0,
         resolved.map_height_m / 1000.0
     ));
-    ui.label(format!(
-        "Resolved sea level norm: {:.3}",
-        resolved.sea_level_norm
-    ));
+    ui.separator();
+
+    let regenerate = draw_world_controls(ui, config, rescale_cell_size_m, auto_generate);
     ui.separator();
 
     egui::CollapsingHeader::new("Grid")
@@ -57,6 +64,17 @@ pub fn draw_params(ui: &mut Ui, config: &mut WorldGenConfig, rescale_cell_size_m
             cell_size_rescale_control(ui, config, rescale_cell_size_m);
         });
 
+    egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
+        ui.label(format!(
+            "Resolved sea level norm: {:.3}",
+            resolved.sea_level_norm
+        ));
+        draw_advanced(ui, config, &defaults);
+    });
+    regenerate
+}
+
+fn draw_advanced(ui: &mut Ui, config: &mut WorldGenConfig, defaults: &WorldGenConfig) {
     egui::CollapsingHeader::new("Vertical datum").show(ui, |ui| {
         meter_field(
             ui,

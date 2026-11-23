@@ -53,7 +53,7 @@ pub struct WorldMap {
     pub ridge_influence: Vec<f32>,
     /// Temperature normalized from −15 to 35 °C.
     pub temperature: Vec<f32>,
-    /// Rainfall normalized from 0 to 2000 mm/year, and zero on water.
+    /// Rainfall normalized as `1 - exp(-mm / 1500)`, and zero on water.
     pub rainfall: Vec<f32>,
     /// Mean annual temperature in °C.
     pub temperature_c: Vec<f32>,
